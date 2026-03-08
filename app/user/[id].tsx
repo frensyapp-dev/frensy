@@ -577,6 +577,61 @@ export default function UserDetailScreen() {
         </View>
       </Modal>
 
+      <Modal
+        animationType="fade"
+        transparent={true}
+        visible={menuOpen}
+        onRequestClose={() => setMenuOpen(false)}
+      >
+        <Pressable onPress={() => setMenuOpen(false)} style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' }}>
+          <View style={{ width: 300, backgroundColor: '#222', borderRadius: 16, overflow: 'hidden', borderWidth: 1, borderColor: '#333' }}>
+            <TouchableOpacity 
+              onPress={() => {
+                setMenuOpen(false);
+                Alert.alert('Signaler', 'Pourquoi souhaitez-vous signaler cet utilisateur ?', [
+                  { text: 'Annuler', style: 'cancel' },
+                  { text: 'Spam / Faux profil', onPress: () => reportUser(uid as string, 'spam').then(() => showToast('Signalé', 'Merci pour votre signalement.', 'success')) },
+                  { text: 'Harcèlement', onPress: () => reportUser(uid as string, 'harassment').then(() => showToast('Signalé', 'Merci pour votre signalement.', 'success')) },
+                  { text: 'Contenu inapproprié', onPress: () => reportUser(uid as string, 'inappropriate').then(() => showToast('Signalé', 'Merci pour votre signalement.', 'success')) },
+                ]);
+              }}
+              style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: '#333' }}
+            >
+              <Text style={{ color: '#fff', fontSize: 16, fontWeight: '600', textAlign: 'center' }}>Signaler l'utilisateur</Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity 
+              onPress={() => {
+                setMenuOpen(false);
+                Alert.alert('Bloquer', 'Voulez-vous vraiment bloquer cet utilisateur ? Vous ne pourrez plus vous voir ni vous contacter.', [
+                  { text: 'Annuler', style: 'cancel' },
+                  { 
+                    text: 'Bloquer', 
+                    style: 'destructive', 
+                    onPress: async () => {
+                      try {
+                        await blockUser(uid as string);
+                        showToast('Bloqué', 'Utilisateur bloqué.', 'info');
+                        router.replace('/(tabs)/home');
+                      } catch (e) {
+                        showToast('Erreur', "Impossible de bloquer.", 'error');
+                      }
+                    } 
+                  },
+                ]);
+              }}
+              style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: '#333' }}
+            >
+              <Text style={{ color: '#EF4444', fontSize: 16, fontWeight: '600', textAlign: 'center' }}>Bloquer</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity onPress={() => setMenuOpen(false)} style={{ padding: 16, backgroundColor: '#333' }}>
+              <Text style={{ color: '#ccc', fontSize: 16, fontWeight: '600', textAlign: 'center' }}>Annuler</Text>
+            </TouchableOpacity>
+          </View>
+        </Pressable>
+      </Modal>
+
       {/* Invitation Modal */}
       <Modal
         animationType="fade"

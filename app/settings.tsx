@@ -591,6 +591,7 @@ export default function SettingsScreen() {
           <RowBtn icon="shield" text="Vie privée" onPress={() => router.push('/privacy' as any)} />
           <RowBtn icon="file" text="Politique de confidentialité" onPress={() => Linking.openURL('https://frensyapp-dev.github.io/frensy/privacy.html')} />
           <RowBtn icon="file-text" text="Conditions d'utilisation (CGU)" onPress={() => Linking.openURL('https://frensyapp-dev.github.io/frensy/terms.html')} />
+          <RowBtn icon="envelope" text="Contacter le support" onPress={() => Linking.openURL('mailto:frensy.app@gmail.com')} />
           <RowBtn icon="star" text="Noter l’application" onPress={() => Linking.openURL('https://expo.dev')} />
           <RowBtn
             icon="sign-out"
