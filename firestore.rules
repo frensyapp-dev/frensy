@@ -1,0 +1,211 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(uid) { return isSignedIn() && request.auth.uid == uid; }
+    
+    // Helper to validate string length
+    function isValidText(text, maxLen) {
+      return text is string && text.size() <= maxLen;
+    }
+
+    // Fonctions pour les Groupes
+    function isGroupMember(groupId) {
+      return exists(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid));
+    }
+    function isGroupAdmin(groupId) {
+      let memberPath = /databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid);
+      return exists(memberPath) && get(memberPath).data.role in ['admin', 'owner'];
+    }
+
+    match /users/{uid} {
+      allow read: if isSignedIn();
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasOnly([
+          'firstName','accountType','groupMembers','groupComposition','age','birthday','birthDate','interests','genders','genderIdentity',
+          'desiredMinAge','desiredMaxAge','discoveryRadiusKm','heightCm',
+          'photos','primaryPhotoPath','ageLock','contacts','avatarFocusX',
+          'avatarFocusY','avatarZoom','noteText','completed','createdAt',
+          'updatedAt','expoPushToken','notifications','ghostMode'
+        ])
+        && (
+          !('createdAt' in request.resource.data) || request.resource.data.createdAt is timestamp
+        )
+        && (!('age' in request.resource.data) || request.resource.data.age >= 18)
+        && (!('ageLock' in request.resource.data) || request.resource.data.ageLock == 'adult');
+
+      allow update: if isOwner(uid)
+        && (
+          !('updatedAt' in request.resource.data) || request.resource.data.updatedAt is timestamp
+        )
+        && (!('age' in request.resource.data) || request.resource.data.age >= 18)
+        && (!('ageLock' in request.resource.data) || request.resource.data.ageLock == 'adult')
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'firstName','accountType','groupMembers','groupComposition','age','birthday','birthDate','interests','genders','genderIdentity',
+          'desiredMinAge','desiredMaxAge','discoveryRadiusKm','heightCm',
+          'photos','primaryPhotoPath','ageLock','contacts','avatarFocusX',
+          'avatarFocusY','avatarZoom','noteText','completed','updatedAt',
+          'expoPushToken','notifications','ghostMode','messagesSentCount'
+        ]);
+      allow delete: if isOwner(uid);
+      
+      // Subcollection for joined groups persistence
+      match /joined_groups/{groupId} {
+        allow read, write: if isOwner(uid);
+      }
+    }
+
+    // Private settings (tokens, preferences, limits)
+    match /users/{uid}/private/settings {
+      allow read: if isOwner(uid);
+      allow delete: if isOwner(uid);
+      allow write: if isOwner(uid) && (
+        resource == null || (
+          // Sécurité: Empêcher l'augmentation du solde (pins) ou l'upgrade abonnement via le client
+          // Seules les Cloud Functions (Admin SDK) peuvent créditer. Le client peut seulement débiter (dépenser).
+          request.resource.data.get('pins', 0) <= resource.data.get('pins', 0) &&
+          request.resource.data.get('subscription', 'FREE') == resource.data.get('subscription', 'FREE') &&
+          request.resource.data.get('subscriptionExpiryMs', 0) == resource.data.get('subscriptionExpiryMs', 0) &&
+          // Empêcher l'ajout d'items bonus via client
+          request.resource.data.get('bonusInvites', 0) <= resource.data.get('bonusInvites', 0) &&
+          request.resource.data.get('bonusUndos', 0) <= resource.data.get('bonusUndos', 0) &&
+          request.resource.data.get('bonusBoosts', 0) <= resource.data.get('bonusBoosts', 0) &&
+          request.resource.data.get('bonusUnlockLikes', 0) <= resource.data.get('bonusUnlockLikes', 0) &&
+          request.resource.data.get('bonusSuperInvites', 0) <= resource.data.get('bonusSuperInvites', 0)
+        )
+      );
+    }
+
+    // Swipes: utilisé pour filtrer les profils déjà vus
+    match /swipes/{uid}/outgoing/{target} {
+      allow read: if isOwner(uid);
+      allow write: if isOwner(uid) 
+        && request.resource.data.keys().hasOnly(['v', 'at', 'createdAt'])
+        && request.resource.data.v is number; 
+    }
+
+    // Likes: utilisé pour le matching
+    match /likes/{likeId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn() && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
+      allow create: if isSignedIn() &&
+        request.resource.data.from == request.auth.uid &&
+        request.resource.data.from != request.resource.data.to && // Empêcher self-like
+        request.resource.data.keys().hasOnly(['from','to','createdAt']);
+      allow delete: if false;
+    }
+
+    match /matches/{matchId} {
+      allow read: if isSignedIn() && (resource == null || request.auth.uid in resource.data.users);
+      allow create: if isSignedIn() &&
+        request.resource.data.users.size() == 2 &&
+        request.auth.uid in request.resource.data.users;
+      allow update: if isSignedIn() && request.auth.uid in resource.data.users;
+      allow delete: if false;
+    }
+
+    match /matches/{matchId}/messages/{msgId} {
+      allow create: if isSignedIn() &&
+        request.resource.data.senderId == request.auth.uid &&
+        request.auth.uid in get(/databases/$(database)/documents/matches/$(matchId)).data.users;
+      allow read: if isSignedIn() &&
+        request.auth.uid in get(/databases/$(database)/documents/matches/$(matchId)).data.users;
+    }
+
+    // Stories
+    match /stories/{storyId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.uid == request.auth.uid;
+    }
+
+    match /positions/{uid} {
+      // Lecture publique pour la découverte (filtré côté client par distance/précision)
+      allow read: if isSignedIn(); 
+      allow write: if isOwner(uid)
+        && request.resource.data.keys().hasOnly([
+            'uid', 'lat', 'lng', 'geohash', 'updatedAt', 'updatedAtMs', 
+            'precisionKm', 'accuracy', 'name', 'age', 'boostExpiresAt', 
+            'manualBaseExpiresAt', 'isManualBase', 'img'
+        ]);
+      allow delete: if isOwner(uid);
+    }
+
+    match /locationShares/{shareId} {
+      allow read: if isSignedIn() && (request.auth.uid == resource.data.from || request.auth.uid == resource.data.to);
+      allow create: if isSignedIn() && request.resource.data.from == request.auth.uid;
+      allow update: if isSignedIn() && (request.auth.uid == resource.data.from || request.auth.uid == resource.data.to);
+    }
+
+    match /locationAccessLogs/{logId} {
+       allow read: if isSignedIn() && (request.auth.uid == resource.data.targetUid || request.auth.uid == resource.data.accessedBy);
+       allow create: if isSignedIn() && request.resource.data.accessedBy == request.auth.uid;
+    }
+
+    match /chatRequests/{id} {
+      allow create: if isSignedIn();
+      allow read: if isSignedIn();
+      allow update: if isSignedIn();
+      allow delete: if isSignedIn();
+    }
+
+    match /reports/{reportId} {
+      allow create: if isSignedIn() && request.resource.data.reporter == request.auth.uid;
+      allow read: if false; 
+    }
+
+    match /exclusions/{uid} {
+      allow read, write: if isOwner(uid);
+    }
+
+    match /blocks/{uid}/users/{blockedUid} {
+      allow read, write: if isOwner(uid);
+    }
+
+    match /moderation_photos/{uid} {
+      allow read: if isOwner(uid);
+    }
+    
+    // --- RÈGLES GROUPES ---
+    match /groups/{groupId} {
+      allow read: if isSignedIn();
+      
+      allow create: if isSignedIn() &&
+        request.resource.data.createdBy == request.auth.uid &&
+        (!('ageLock' in request.resource.data) || request.resource.data.ageLock == 'adult');
+
+      allow update: if isSignedIn() && (
+         // Cas 1: Admin modifie le groupe
+         (isGroupAdmin(groupId) && 
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['ageLock', 'createdBy', 'memberCount']))
+         ||
+         // Cas 2: Mise à jour du compteur de membres (join/leave)
+         (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberCount']) &&
+            (request.resource.data.memberCount == resource.data.memberCount + 1 || request.resource.data.memberCount == resource.data.memberCount - 1)
+         )
+      );
+
+      match /members/{memberId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn() && request.auth.uid == memberId;
+        allow delete: if isSignedIn() && (
+          request.auth.uid == memberId || isGroupAdmin(groupId)
+        );
+        allow update: if isSignedIn() && isGroupAdmin(groupId);
+      }
+      
+      match /messages/{msgId} {
+        allow read: if isSignedIn() && isGroupMember(groupId);
+        allow create: if isSignedIn() && 
+          isGroupMember(groupId) && 
+          request.resource.data.senderId == request.auth.uid &&
+          (!('text' in request.resource.data) || isValidText(request.resource.data.text, 2000));
+        allow update: if isSignedIn() && isGroupMember(groupId) && (
+          (resource.data.senderId == request.auth.uid) ||
+          (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['votes']))
+        );
+      }
+    }
+  }
+}

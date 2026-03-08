@@ -1,0 +1,22 @@
+
+<svg width="300" height="300" viewBox="0 0 300 300" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="gradDark" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FDBA74"/> <!-- orange clair -->
+      <stop offset="100%" stop-color="#FB923C"/> <!-- orange vif -->
+    </linearGradient>
+    <filter id="glowDark" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <!-- Forme goutte/pin avec glow clair/orange -->
+  <path d="M150 20C95 20 50 65 50 120C50 200 150 280 150 280C150 280 250 200 250 120C250 65 205 20 150 20Z"
+        fill="url(#gradDark)" filter="url(#glowDark)"/>
+  <!-- silhouettes en clair -->
+  <circle cx="125" cy="115" r="20" fill="#FFF7ED" opacity="0.95"/>
+  <circle cx="175" cy="115" r="20" fill="#FFF7ED" opacity="0.75"/>
+</svg>

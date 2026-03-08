@@ -1,0 +1,43 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isImage() {
+      return request.resource.contentType.matches('image/.*');
+    }
+
+    function maxSize(bytes) {
+      return request.resource.size < bytes;
+    }
+
+    // Images de chat
+    // Sécurité : On vérifie que l'UID de l'utilisateur est présent dans l'ID du match (uidA_uidB)
+    match /chats/{matchId}/{file} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() 
+                   && matchId.matches('.*' + request.auth.uid + '.*')
+                   && isImage() 
+                   && maxSize(15 * 1024 * 1024);
+    }
+
+    // Images de groupe
+    match /groups/{groupId}/{file} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isImage() && maxSize(15 * 1024 * 1024);
+    }
+
+    match /users/{uid}/photos/{file} {
+      allow read: if true;
+      allow write: if isSignedIn() && request.auth.uid == uid && isImage() && maxSize(15 * 1024 * 1024);
+    }
+
+    // Le reste : interdit
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,29 +1,47 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
-import { useFonts } from 'expo-font';
+import { DarkTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import 'react-native-reanimated';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import * as Notifications from 'expo-notifications';
+import { ToastProvider } from '../components/ui/Toast';
+import { OfflineBanner } from '../components/ui/OfflineBanner';
+import { TutorialProvider } from '../components/TutorialProvider';
+import '@/lib/backgroundLocation'; // Register background task
 
-import { useColorScheme } from '@/hooks/useColorScheme';
+// Configure notifications to show even when app is in foreground
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
+
+import { ErrorBoundary } from 'expo-router';
+
+export { ErrorBoundary };
 
 export default function RootLayout() {
-  const colorScheme = useColorScheme();
-  const [loaded] = useFonts({
-    SpaceMono: require('../assets/fonts/SpaceMono-Regular.ttf'),
-  });
-
-  if (!loaded) {
-    // Async font loading only occurs in development.
-    return null;
-  }
-
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="+not-found" />
-      </Stack>
-      <StatusBar style="auto" />
-    </ThemeProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <ToastProvider>
+        <TutorialProvider>
+          <ThemeProvider value={DarkTheme}>
+            <StatusBar style="light" />
+            <OfflineBanner />
+            <Stack
+              screenOptions={{
+                headerShown: false,
+                gestureEnabled: false,
+                presentation: 'card',
+                animation: 'fade',
+              }}
+            />
+          </ThemeProvider>
+        </TutorialProvider>
+      </ToastProvider>
+    </GestureHandlerRootView>
   );
 }

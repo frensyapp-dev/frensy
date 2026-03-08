@@ -1,26 +1,40 @@
-/**
- * Below are the colors that are used in the app. The colors are defined in the light and dark mode.
- * There are many other ways to style your app. For example, [Nativewind](https://www.nativewind.dev/), [Tamagui](https://tamagui.dev/), [unistyles](https://reactnativeunistyles.vercel.app), etc.
- */
-
-const tintColorLight = '#0a7ea4';
-const tintColorDark = '#fff';
-
 export const Colors = {
   light: {
-    text: '#11181C',
-    background: '#fff',
-    tint: tintColorLight,
-    icon: '#687076',
-    tabIconDefault: '#687076',
-    tabIconSelected: tintColorLight,
+    text: '#000000',
+    background: '#FFFFFF',
+    card: '#F7F7F7',
+    tint: '#FF7A00',
+    tintAlt: '#FF5400',
+    gold: '#FFD700',
+    gradientStart: '#FF8A1A',
+    gradientEnd: '#FF4D00',
+    overlay: 'rgba(255,122,0,0.12)',
+    border: 'rgba(0,0,0,0.08)',
+    muted: '#7A7A7A',
+    panel: '#F3F4F6',
+    panelBorder: '#E5E7EB',
+    subtleText: '#6B7280',
+    danger: '#EF4444',
+    success: '#10B981',
+    warning: '#F59E0B',
   },
   dark: {
-    text: '#ECEDEE',
-    background: '#151718',
-    tint: tintColorDark,
-    icon: '#9BA1A6',
-    tabIconDefault: '#9BA1A6',
-    tabIconSelected: tintColorDark,
+    text: '#FFFFFF',
+    background: '#000000',
+    card: '#111111',
+    tint: '#FF7A00',
+    tintAlt: '#FF4D00',
+    gold: '#FFD700',
+    gradientStart: '#FF7A00',
+    gradientEnd: '#E84300',
+    overlay: 'rgba(255,122,0,0.10)',
+    border: 'rgba(255,255,255,0.08)',
+    muted: '#A6A6A6',
+    panel: '#1F2937',
+    panelBorder: '#374151',
+    subtleText: '#9CA3AF',
+    danger: '#F87171',
+    success: '#34D399',
+    warning: '#FBBF24',
   },
-};
+} as const;
