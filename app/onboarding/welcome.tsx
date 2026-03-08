@@ -2,7 +2,7 @@ import * as Haptics from 'expo-haptics'
 import { LinearGradient } from 'expo-linear-gradient'
 import { router, Stack } from 'expo-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Animated, Dimensions, Easing, Image, StyleSheet, Text, View } from 'react-native'
+import { Animated, Dimensions, Easing, Image, Linking, StyleSheet, Text, View } from 'react-native'
 import { GradientButton } from '../../components/ui/GradientButton'
 import { Colors } from '../../constants/Colors'
 
@@ -87,7 +87,9 @@ export default function OnboardingWelcome() {
 
             <Animated.View style={[s.footer, { opacity: fadeAnim }]}>
                 <GradientButton label="C'est parti" onPress={goNext} />
-                <Text style={s.terms}>En continuant, tu acceptes nos CGU.</Text>
+                <Text style={s.terms}>
+                  En continuant, tu acceptes nos <Text style={{ textDecorationLine: 'underline' }} onPress={() => Linking.openURL('https://frensyapp-dev.github.io/frensy/terms.html')}>CGU</Text> et <Text style={{ textDecorationLine: 'underline' }} onPress={() => Linking.openURL('https://frensyapp-dev.github.io/frensy/privacy.html')}>Confidentialité</Text>.
+                </Text>
             </Animated.View>
         </View>
       </LinearGradient>

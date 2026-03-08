@@ -589,8 +589,8 @@ export default function SettingsScreen() {
           <View style={[styles.card, { backgroundColor: C.card, borderColor: C.border }]}> 
           <RowBtn icon="ban" text="Utilisateurs bloqués" onPress={() => router.push('/settings/blocked-users' as any)} />
           <RowBtn icon="shield" text="Vie privée" onPress={() => router.push('/privacy' as any)} />
-          <RowBtn icon="file" text="Politique de confidentialité" onPress={() => router.push('/legal/privacy' as any)} />
-          <RowBtn icon="file-text" text="Conditions d'utilisation (CGU)" onPress={() => router.push('/legal/terms' as any)} />
+          <RowBtn icon="file" text="Politique de confidentialité" onPress={() => Linking.openURL('https://frensyapp-dev.github.io/frensy/privacy.html')} />
+          <RowBtn icon="file-text" text="Conditions d'utilisation (CGU)" onPress={() => Linking.openURL('https://frensyapp-dev.github.io/frensy/terms.html')} />
           <RowBtn icon="star" text="Noter l’application" onPress={() => Linking.openURL('https://expo.dev')} />
           <RowBtn
             icon="sign-out"

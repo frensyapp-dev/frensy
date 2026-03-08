@@ -78,7 +78,7 @@ const config = {
     router: {},
     eas: { projectId: '0a9244fd-b83d-4e65-b107-aadcc3c2a424' },
     // TODO: Remplacez <username> et <repo> par votre nom d'utilisateur GitHub et le nom du dépôt
-    privacyPolicyUrl: 'https://math_0.github.io/frendzy/privacy.html',
+    privacyPolicyUrl: 'https://frensyapp-dev.github.io/frensy/privacy.html',
   },
   owner: 'math_0',
 };

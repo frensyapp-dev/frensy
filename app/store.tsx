@@ -5,7 +5,7 @@ import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { onSnapshot } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, Image, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Animated, Image, Linking, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { PurchasesPackage } from 'react-native-purchases';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useToast } from '../components/ui/Toast';
@@ -889,10 +889,10 @@ function StoreModalContent({ onClose, initialTab, onBalanceUpdate }: { onClose: 
              </TouchableOpacity>
              
              <View style={{ flexDirection: 'row', gap: 20 }}>
-                <TouchableOpacity onPress={() => router.push('/legal/terms')}>
+                <TouchableOpacity onPress={() => Linking.openURL('https://frensyapp-dev.github.io/frensy/terms.html')}>
                     <Text style={{ color: C.subtleText, fontSize: 12 }}>Conditions Générales</Text>
                 </TouchableOpacity>
-                <TouchableOpacity onPress={() => router.push('/legal/privacy')}>
+                <TouchableOpacity onPress={() => Linking.openURL('https://frensyapp-dev.github.io/frensy/privacy.html')}>
                     <Text style={{ color: C.subtleText, fontSize: 12 }}>Politique de Confidentialité</Text>
                 </TouchableOpacity>
              </View>

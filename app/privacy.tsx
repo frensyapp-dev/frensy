@@ -1,6 +1,6 @@
 import { Stack, router } from 'expo-router';
 import React, { useEffect, useState } from 'react';
-import { Alert, ActivityIndicator, ScrollView, Switch, Text, TouchableOpacity, View } from 'react-native';
+import { Alert, ActivityIndicator, Linking, ScrollView, Switch, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors } from '../constants/Colors';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
@@ -135,7 +135,7 @@ export default function PrivacyScreen() {
           <Text style={{ color: C.muted }}>
             Plus d’infos: les coordonnées exactes ne sont utilisées que pour calculer la proximité et ne sont pas exposées aux autres utilisateurs. Tu peux supprimer ton compte ci-dessous.
           </Text>
-          <TouchableOpacity onPress={() => router.push('/legal/privacy')}>
+          <TouchableOpacity onPress={() => Linking.openURL('https://frensyapp-dev.github.io/frensy/privacy.html')}>
             <Text style={{ color: C.tint, fontWeight: 'bold' }}>Lire le document complet</Text>
           </TouchableOpacity>
         </View>
@@ -149,7 +149,7 @@ export default function PrivacyScreen() {
           <Text style={{ color: C.muted }}>
             Conditions d’utilisation et politique de confidentialité mises à jour. Consulte les paramètres pour gérer tes consentements et notifications.
           </Text>
-          <TouchableOpacity onPress={() => router.push('/legal/terms')}>
+          <TouchableOpacity onPress={() => Linking.openURL('https://frensyapp-dev.github.io/frensy/terms.html')}>
             <Text style={{ color: C.tint, fontWeight: 'bold' }}>Lire les CGU</Text>
           </TouchableOpacity>
         </View>
