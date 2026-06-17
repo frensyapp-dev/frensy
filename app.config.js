@@ -1,5 +1,4 @@
 const ANDROID_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY_ANDROID || process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY || '';
-const IOS_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY_IOS || process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY || '';
 const REVENUECAT_APPLE = process.env.EXPO_PUBLIC_REVENUECAT_APPLE || '';
 const REVENUECAT_GOOGLE = process.env.EXPO_PUBLIC_REVENUECAT_GOOGLE || '';
 const asset = (p) => `./${p}`;
@@ -20,8 +19,6 @@ const config = {
     supportsTablet: true,
     bundleIdentifier: 'com.math0.frensy',
     usesAppleSignIn: true,
-    config: IOS_KEY ? { googleMapsApiKey: IOS_KEY } : {},
-
     googleServicesFile: './GoogleService-Info.plist',
     infoPlist: {
       ITSAppUsesNonExemptEncryption: false,

@@ -1,7 +1,7 @@
 import { FontAwesome } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import React from 'react';
-import { Text, View, ViewStyle } from 'react-native';
+import { Platform, Text, View, ViewStyle } from 'react-native';
 import MapView, { Circle, Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import Avatar from '../ui/Avatar';
 
@@ -67,6 +67,8 @@ export default function NativeMap({
 }: Props) {
   // Charger react-native-maps uniquement sur natif et à l'intérieur du rendu
   const MapBase = MapView;
+  const mapProvider = Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined;
+  const mapStyle = Platform.OS === 'android' ? (scheme === 'dark' ? darkMapStyle : lightMapStyle) : undefined;
 
   // Toujours activer le clustering pour gérer les superpositions, même zoomé
   const clusterEnabled = true;
@@ -98,7 +100,7 @@ export default function NativeMap({
     <MapBase
       ref={mapRef}
       style={style}
-      provider={PROVIDER_GOOGLE}
+      provider={mapProvider}
       initialRegion={region}
       onRegionChangeComplete={setRegion}
       showsUserLocation={false}
@@ -115,7 +117,7 @@ export default function NativeMap({
       showsTraffic={false}
       loadingEnabled
       loadingIndicatorColor={C.tint}
-      customMapStyle={scheme === 'dark' ? darkMapStyle : lightMapStyle}
+      customMapStyle={mapStyle}
     >
       {/* Cercle de rayon de découverte autour de "Moi" */}
       {self && typeof radiusKm === 'number' && radiusKm > 0 && (
