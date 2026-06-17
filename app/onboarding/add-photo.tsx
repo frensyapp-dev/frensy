@@ -11,9 +11,12 @@ import { ActivityIndicator, Alert, Dimensions, Linking, Modal, Pressable, StyleS
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 import { GradientButton } from '../../components/ui/GradientButton';
+import { hapticSuccess, hapticWarning } from '../../lib/haptics';
 
 const AnimatedImage = Animated.createAnimatedComponent(Image);
-const { width } = Dimensions.get('window');
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
+const isSmallDevice = SCREEN_H < 750;
+const PHOTO_SIZE = isSmallDevice ? 220 : 280;
 
 export default function AddPhotoScreen() {
   const [url, setUrl] = useState<string | null>(null);
@@ -44,8 +47,8 @@ export default function AddPhotoScreen() {
     scale.value = withSpring(zoom);
     savedScale.value = zoom;
     if (zoom > 1) {
-        const tx = (0.5 - focusX) * 200 * (zoom - 1);
-        const ty = (0.5 - focusY) * 200 * (zoom - 1);
+        const tx = (0.5 - focusX) * PHOTO_SIZE * (zoom - 1);
+        const ty = (0.5 - focusY) * PHOTO_SIZE * (zoom - 1);
         transX.value = withSpring(tx);
         transY.value = withSpring(ty);
         savedTransX.value = tx;
@@ -62,11 +65,10 @@ export default function AddPhotoScreen() {
   const updateFocusState = (s: number, tx: number, ty: number) => {
     setZoom(s);
     if (s > 1) {
-      const size = 200;
-      // Reverse calculation: tx = (0.5 - fx) * size * (s - 1)
-      // fx = 0.5 - tx / (size * (s - 1))
-      const fx = 0.5 - (tx / (size * (s - 1)));
-      const fy = 0.5 - (ty / (size * (s - 1)));
+      // Reverse calculation: tx = (0.5 - fx) * PHOTO_SIZE * (s - 1)
+      // fx = 0.5 - tx / (PHOTO_SIZE * (s - 1))
+      const fx = 0.5 - (tx / (PHOTO_SIZE * (s - 1)));
+      const fy = 0.5 - (ty / (PHOTO_SIZE * (s - 1)));
       setFocusX(Math.max(0, Math.min(1, fx)));
       setFocusY(Math.max(0, Math.min(1, fy)));
     } else {
@@ -85,7 +87,7 @@ export default function AddPhotoScreen() {
       // Max translation allowed in one direction = (scaledSize - size) / 2
       // scaledSize = size * scale
       // max = size * (scale - 1) / 2
-      const max = Math.max(0, 100 * (scale.value - 1));
+      const max = Math.max(0, (PHOTO_SIZE / 2) * (scale.value - 1));
       
       transX.value = Math.min(Math.max(nextX, -max), max);
       transY.value = Math.min(Math.max(nextY, -max), max);
@@ -106,7 +108,7 @@ export default function AddPhotoScreen() {
     .onEnd(() => {
       savedScale.value = scale.value;
       // Re-clamp translation if we zoomed out
-      const max = Math.max(0, 100 * (scale.value - 1));
+      const max = Math.max(0, (PHOTO_SIZE / 2) * (scale.value - 1));
       if (Math.abs(transX.value) > max) {
          transX.value = withSpring(Math.sign(transX.value) * max);
          savedTransX.value = Math.sign(transX.value) * max;
@@ -157,6 +159,8 @@ export default function AddPhotoScreen() {
   }, [uid]);
 
   const onPick = async () => {
+    if (uploading || analyzing) return;
+    
     try {
       const { status, canAskAgain } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       
@@ -180,8 +184,8 @@ export default function AddPhotoScreen() {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
         allowsEditing: false,
-        quality: 0.8, // Bon compromis qualité/mémoire
-        // legacy: true retiré car inutile sur iOS et potentiellement problématique
+        allowsMultipleSelection: false, // Force single selection
+        quality: 0.8,
       });
 
       if (result.canceled || !result.assets || result.assets.length === 0) return;
@@ -227,6 +231,7 @@ export default function AddPhotoScreen() {
 
   const onContinue = async () => {
     if (!path || !uid) {
+      hapticWarning();
       Alert.alert('Ajoute une photo', 'Tu dois ajouter au moins une photo pour continuer.');
       return;
     }
@@ -241,8 +246,10 @@ export default function AddPhotoScreen() {
         avatarFocusY: focusY,
         avatarZoom: zoom,
       });
-      router.replace('/(tabs)/profile');
+      hapticSuccess();
+      router.replace('/onboarding/ghost-setup' as any);
     } catch (e: any) {
+      hapticWarning();
       Alert.alert('Erreur', "Impossible de sauvegarder le profil.");
     } finally {
       setUploading(false);
@@ -252,13 +259,12 @@ export default function AddPhotoScreen() {
   return (
     <>
       <Stack.Screen options={{ headerShown: false, gestureEnabled: false }} />
-      <LinearGradient colors={['#0f172a', '#1e293b', '#000000']} style={{ flex: 1 }}>
+      <LinearGradient colors={['#000000', '#111827']} style={{ flex: 1 }}>
         <View style={s.container}>
+            <View style={s.glow} />
             
             <View style={s.content}>
-                <View style={s.stepContainer}>
-                  <Text style={s.stepText}>ÉTAPE 5 sur 5</Text>
-                </View>
+                <Text style={s.stepIndicator}>Étape 5 sur 5</Text>
                 
                 <Text style={s.title}>Ta meilleure photo</Text>
                 <Text style={s.subtitle}>
@@ -272,14 +278,14 @@ export default function AddPhotoScreen() {
                     <GestureDetector gesture={composed}>
                       <View style={[
                         s.photoWrapper, 
-                        { borderColor: editMode ? '#F97316' : 'rgba(255,255,255,0.2)' }
+                        { borderColor: editMode ? '#F97316' : 'rgba(255,255,255,0.1)' }
                       ]}>
                            <AnimatedImage 
                              source={{ uri: url }} 
                              style={[{ 
                                width: '100%', 
                                height: '100%', 
-                               backgroundColor: '#1e293b'
+                               backgroundColor: '#111'
                              }, animatedStyle]} 
                              contentFit="cover"
                              cachePolicy="memory-disk" 
@@ -292,17 +298,22 @@ export default function AddPhotoScreen() {
                       </View>
                     </GestureDetector>
                   ) : (
-                    <Pressable onPress={onPick} style={[
-                      s.photoWrapper, 
-                      s.emptyPhotoWrapper
-                    ]}>
+                    <Pressable 
+                      onPress={onPick} 
+                      style={({ pressed }) => [
+                        s.photoWrapper, 
+                        s.emptyPhotoWrapper,
+                        pressed && { opacity: 0.7, scale: 0.98 }
+                      ]}
+                      hitSlop={10}
+                    >
                         <View style={s.emptyPhotoContent}>
                           {uploading ? (
                              <ActivityIndicator color="#F97316" size="large" />
                           ) : (
                              <>
                                <View style={s.iconContainer}>
-                                 <Ionicons name="camera" size={32} color="#F97316" />
+                                 <Ionicons name="camera" size={PHOTO_SIZE * 0.12} color="#F97316" />
                                </View>
                                <Text style={s.addPhotoText}>Ajouter une photo</Text>
                              </>
@@ -313,11 +324,26 @@ export default function AddPhotoScreen() {
                   
                   {url && !uploading && (
                     <View style={s.actionsContainer}>
-                       <Pressable onPress={() => setEditMode(!editMode)} style={[s.actionButton, editMode && s.actionButtonActive]}>
+                       <Pressable 
+                         onPress={() => setEditMode(!editMode)} 
+                         style={({ pressed }) => [
+                           s.actionButton, 
+                           editMode && s.actionButtonActive,
+                           pressed && { opacity: 0.8 }
+                         ]}
+                         hitSlop={10}
+                       >
                           <Ionicons name="crop" size={18} color={editMode ? "#fff" : "#ccc"} />
                           <Text style={[s.actionText, editMode && { color: '#fff' }]}>{editMode ? 'Terminé' : 'Ajuster'}</Text>
                        </Pressable>
-                       <Pressable onPress={onPick} style={s.actionButton}>
+                       <Pressable 
+                         onPress={onPick} 
+                         style={({ pressed }) => [
+                           s.actionButton,
+                           pressed && { opacity: 0.8 }
+                         ]}
+                         hitSlop={10}
+                       >
                           <Ionicons name="refresh" size={18} color="#ccc" />
                           <Text style={s.actionText}>Changer</Text>
                        </Pressable>
@@ -335,7 +361,11 @@ export default function AddPhotoScreen() {
             </View>
 
             <View style={s.footer}>
-                 <GradientButton label={uploading ? "Envoi..." : "Terminer"} onPress={onContinue} disabled={uploading || !url} />
+                 <GradientButton 
+                   label={uploading ? "Envoi..." : "Terminer"} 
+                   onPress={onContinue} 
+                   disabled={uploading || !url} 
+                 />
             </View>
 
             <Modal visible={analyzing} transparent animationType="fade">
@@ -356,68 +386,63 @@ export default function AddPhotoScreen() {
 }
 
 const s = StyleSheet.create({
-  container: { flex: 1, paddingHorizontal: 24, paddingVertical: 60, justifyContent: 'space-between' },
-  content: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  
-  stepContainer: {
-    backgroundColor: 'rgba(249, 115, 22, 0.15)',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
-    marginBottom: 20,
-    borderWidth: 1,
-    borderColor: 'rgba(249, 115, 22, 0.3)',
+  container: { 
+    flex: 1, 
+    paddingHorizontal: 24, 
+    paddingTop: SCREEN_H < 700 ? 40 : 60, 
+    paddingBottom: 40,
+    width: '100%',
+    maxWidth: 500,
+    alignSelf: 'center',
   },
-  stepText: { 
+  glow: { position: 'absolute', top: -100, left: -100, width: 300, height: 300, borderRadius: 150, backgroundColor: 'rgba(249, 115, 22, 0.1)' },
+  content: { flex: 1, marginTop: SCREEN_H < 700 ? 20 : 40 },
+  
+  stepIndicator: { 
     color: '#F97316', 
     fontWeight: '700', 
-    fontSize: 12, 
+    fontSize: 14, 
+    marginBottom: 16, 
     letterSpacing: 1, 
     textTransform: 'uppercase' 
   },
   
   title: { 
-    fontSize: 32, 
-    fontWeight: '800', 
+    fontSize: SCREEN_H < 700 ? 32 : 40, 
+    fontWeight: '900', 
     color: '#fff', 
-    marginBottom: 12, 
-    textAlign: 'center' 
+    marginBottom: 8, 
+    lineHeight: SCREEN_H < 700 ? 36 : 44 
   },
   subtitle: { 
-    color: '#94a3b8', 
-    fontSize: 16, 
-    marginBottom: 40, 
-    lineHeight: 24, 
-    textAlign: 'center',
-    maxWidth: '85%'
+    color: 'rgba(255,255,255,0.6)', 
+    fontSize: 15, 
+    marginBottom: SCREEN_H < 700 ? 20 : 40, 
+    lineHeight: 22 
   },
   
   photoSection: {
     alignItems: 'center',
     width: '100%',
+    marginTop: 10,
   },
   
   photoWrapper: { 
-      width: 220, 
-      height: 220, 
-      borderRadius: 110, 
-      backgroundColor: '#1e293b', 
-      borderWidth: 3, 
-      borderStyle: 'solid',
+      width: PHOTO_SIZE, 
+      height: PHOTO_SIZE, 
+      borderRadius: PHOTO_SIZE / 2, 
+      backgroundColor: '#111', 
+      borderWidth: 2, 
+      borderColor: 'rgba(255,255,255,0.1)',
       justifyContent: 'center', 
       alignItems: 'center', 
       overflow: 'hidden',
-      shadowColor: '#000',
-      shadowOffset: { width: 0, height: 10 },
-      shadowOpacity: 0.5,
-      shadowRadius: 20,
-      elevation: 10
   },
   
   emptyPhotoWrapper: {
     borderStyle: 'dashed',
     borderColor: 'rgba(255,255,255,0.15)',
-    backgroundColor: 'rgba(30, 41, 59, 0.5)',
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
   },
   
   emptyPhotoContent: {
@@ -432,14 +457,14 @@ const s = StyleSheet.create({
     width: 64,
     height: 64,
     borderRadius: 32,
-    backgroundColor: 'rgba(249, 115, 22, 0.15)',
+    backgroundColor: 'rgba(249, 115, 22, 0.1)',
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 16
   },
   
   addPhotoText: {
-    color: '#94a3b8',
+    color: 'rgba(255,255,255,0.4)',
     fontSize: 16,
     fontWeight: '600'
   },
@@ -448,7 +473,7 @@ const s = StyleSheet.create({
   
   actionsContainer: {
     flexDirection: 'row',
-    gap: 16,
+    gap: 12,
     marginTop: 32
   },
   
@@ -456,10 +481,10 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingVertical: 10,
+    paddingVertical: 12,
     paddingHorizontal: 20,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderRadius: 24,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderRadius: 20,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.1)'
   },
@@ -470,7 +495,7 @@ const s = StyleSheet.create({
   },
   
   actionText: {
-    color: '#ccc',
+    color: 'rgba(255,255,255,0.6)',
     fontSize: 14,
     fontWeight: '600'
   },
@@ -481,17 +506,17 @@ const s = StyleSheet.create({
   },
   
   instructionsText: {
-    color: '#64748b',
+    color: 'rgba(255,255,255,0.3)',
     fontSize: 13,
     textAlign: 'center',
     fontStyle: 'italic'
   },
 
-  footer: { width: '100%', gap: 16 },
+  footer: { width: '100%' },
   
   modalContainer: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.85)',
+    backgroundColor: 'rgba(0,0,0,0.9)',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20
@@ -500,7 +525,7 @@ const s = StyleSheet.create({
   modalContent: {
     width: '100%',
     maxWidth: 320,
-    backgroundColor: '#1e293b',
+    backgroundColor: '#111',
     borderRadius: 24,
     padding: 32,
     alignItems: 'center',
@@ -517,7 +542,7 @@ const s = StyleSheet.create({
   },
   
   modalText: {
-    color: '#94a3b8',
+    color: 'rgba(255,255,255,0.6)',
     fontSize: 15,
     textAlign: 'center',
     lineHeight: 22

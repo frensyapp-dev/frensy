@@ -42,8 +42,8 @@ export async function processAndUploadProfilePhoto(asset: ImagePicker.ImagePicke
       // Redimensionnement pour un bon compromis qualité/poids (HD)
       manipulated = await ImageManipulator.manipulateAsync(
         asset.uri,
-        [{ resize: { width: 1080 } }], 
-        { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG }
+        [{ resize: { width: 960 } }],
+        { compress: 0.72, format: ImageManipulator.SaveFormat.JPEG }
       );
   } catch (e) {
       console.warn("Image manipulation failed, falling back to original", e);
@@ -105,24 +105,21 @@ export async function pickAndUploadProfilePhoto(validate: boolean = false) {
   return processAndUploadProfilePhoto(asset, validate);
 }
 
-/**
- * Permet de choisir une image pour le chat ou le groupe, la redimensionner (largeur max 1080)
- * puis l’upload dans Firebase Storage sous `chats/{id}/...` ou `groups/{id}/...`.
- * Retourne { path, url, width, height } si succès, sinon null.
- */
-export async function pickAndUploadMessageImage(contextId: string, type: 'chat' | 'group' = 'chat', allowVideo: boolean = false) {
+export async function pickMessageMediaAsset(allowVideo: boolean = false): Promise<ImagePicker.ImagePickerAsset | null> {
   const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
   if (!perm.granted) throw new Error('Permission refusée');
 
   const res = await ImagePicker.launchImageLibraryAsync({
     mediaTypes: allowVideo ? ImagePicker.MediaTypeOptions.All : ImagePicker.MediaTypeOptions.Images,
     allowsEditing: false,
-    quality: 1,
+    quality: 0.8,
     selectionLimit: 1,
   });
   if (res.canceled) return null;
+  return res.assets[0];
+}
 
-  const asset = res.assets[0];
+async function uploadMessageMediaAsset(contextId: string, type: 'chat' | 'group', asset: ImagePicker.ImagePickerAsset) {
   const isVideo = asset.type === 'video';
 
   const storage = getStorage();
@@ -135,12 +132,11 @@ export async function pickAndUploadMessageImage(contextId: string, type: 'chat' 
   let width = asset.width;
   let height = asset.height;
 
-  // Redimensionne à une largeur raisonnable tout en conservant le ratio
   if (!isVideo) {
     const manipulated = await ImageManipulator.manipulateAsync(
       asset.uri,
-      [{ resize: { width: 1080 } }],
-      { compress: 0.9, format: ImageManipulator.SaveFormat.JPEG }
+      [{ resize: { width: 960 } }],
+      { compress: 0.72, format: ImageManipulator.SaveFormat.JPEG }
     );
     finalUri = manipulated.uri;
     width = manipulated.width;
@@ -156,6 +152,17 @@ export async function pickAndUploadMessageImage(contextId: string, type: 'chat' 
   return { path, url, width, height, type: isVideo ? 'video' : 'image' } as const;
 }
 
+/**
+ * Permet de choisir une image pour le chat ou le groupe, la redimensionner (largeur max 1080)
+ * puis l’upload dans Firebase Storage sous `chats/{id}/...` ou `groups/{id}/...`.
+ * Retourne { path, url, width, height } si succès, sinon null.
+ */
+export async function pickAndUploadMessageImage(contextId: string, type: 'chat' | 'group' = 'chat', allowVideo: boolean = false) {
+  const asset = await pickMessageMediaAsset(allowVideo);
+  if (!asset) return null;
+  return uploadMessageMediaAsset(contextId, type, asset);
+}
+
 export const pickAndUploadChatImage = async (chatId: string, allowVideo: boolean = false) => {
   const { getAuth } = await import('firebase/auth');
   const uid = getAuth().currentUser?.uid;
@@ -164,6 +171,18 @@ export const pickAndUploadChatImage = async (chatId: string, allowVideo: boolean
   // Use matchId (conversation ID) for storage path to ensure write permission and consistency
   const matchId = [uid, chatId].sort().join('_');
   return pickAndUploadMessageImage(matchId, 'chat', allowVideo);
+};
+
+export const uploadPickedChatImage = async (chatId: string, asset: ImagePicker.ImagePickerAsset) => {
+  const { getAuth } = await import('firebase/auth');
+  const uid = getAuth().currentUser?.uid;
+  if (!uid) throw new Error('Not authenticated');
+  const matchId = [uid, chatId].sort().join('_');
+  return uploadMessageMediaAsset(matchId, 'chat', asset);
+};
+
+export const uploadPickedGroupImage = async (groupId: string, asset: ImagePicker.ImagePickerAsset) => {
+  return uploadMessageMediaAsset(groupId, 'group', asset);
 };
 
 export async function pickPhotoForPreview() {

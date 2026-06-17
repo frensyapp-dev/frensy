@@ -1,15 +1,13 @@
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import React, { useEffect } from 'react';
-import { Dimensions, StyleSheet, Text, View } from 'react-native';
+import { Dimensions, StyleSheet, View } from 'react-native';
 import Animated, {
     useAnimatedStyle,
     useSharedValue,
     withDelay,
     withSpring,
-    withTiming,
-    withSequence,
-    withRepeat
+    withTiming
 } from 'react-native-reanimated';
 import Logo from '../assets/images/frensylogo.png';
 

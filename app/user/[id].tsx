@@ -21,6 +21,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Avatar from '../../components/ui/Avatar';
+import { useDialog } from '../../components/ui/Dialog';
 import { useToast } from '../../components/ui/Toast';
 import { Colors } from '../../constants/Colors';
 import { auth } from '../../firebaseconfig';
@@ -32,22 +33,22 @@ import { openUserOnMap } from '../../lib/openUserOnMap';
 import { getUserProfile, UserProfile } from '../../lib/profile';
 import { reportUser } from '../../lib/report';
 
-import { useOutgoingInvites } from '../../hooks/useOutgoingInvites';
 import { ACTIVITY_LABELS } from '../../constants/Activities';
+import { useOutgoingInvites } from '../../hooks/useOutgoingInvites';
 
 /* ---------- Helpers ---------- */
 const Row: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => {
   const C = Colors['dark'];
   return (
-    <View style={{ marginBottom: 12 }}>
-      <Text style={[s.label, { color: C.muted }]}>{label}</Text>
+    <View style={{ marginBottom: 20 }}>
+      <Text style={[s.label, { color: '#666', fontSize: 12, marginBottom: 8 }]}>{label}</Text>
       {children}
     </View>
   );
 };
 const Pills: React.FC<{ items: string[] }> = ({ items }) => (
   <View style={s.pills}>
-    {items.map((t) => {
+    {items.slice(0, 15).map((t) => {
        let label = ACTIVITY_LABELS[t] || t.charAt(0).toUpperCase() + t.slice(1);
        return (
          <View key={t} style={s.pill}>
@@ -58,6 +59,24 @@ const Pills: React.FC<{ items: string[] }> = ({ items }) => (
   </View>
 );
 const Empty: React.FC<{ muted: string }> = ({ muted }) => <Text style={{ color: muted }}>—</Text>;
+
+const ExpandableText: React.FC<{ text: string; maxLength?: number }> = ({ text, maxLength = 150 }) => {
+  const [expanded, setExpanded] = useState(false);
+  const shouldTruncate = text.length > maxLength;
+  
+  return (
+    <View>
+      <Text style={{ color: '#E5E5E5', fontSize: 15, lineHeight: 22 }}>
+        {expanded || !shouldTruncate ? text : text.slice(0, maxLength).trim() + '...'}
+      </Text>
+      {shouldTruncate && !expanded && (
+        <TouchableOpacity onPress={() => setExpanded(true)} style={{ marginTop: 4 }}>
+          <Text style={{ color: '#F97316', fontWeight: '600', fontSize: 14 }}>Voir plus</Text>
+        </TouchableOpacity>
+      )}
+    </View>
+  );
+};
 
 export default function UserDetailScreen() {
   const { id } = useLocalSearchParams();
@@ -76,6 +95,7 @@ export default function UserDetailScreen() {
   const [inviteMessage, setInviteMessage] = useState('');
   const [sendingInvite, setSendingInvite] = useState(false);
   const { showToast } = useToast();
+  const { alert, confirm } = useDialog();
 
   // Firestore listener for location sharing status
   const db = getFirestore();
@@ -205,21 +225,18 @@ export default function UserDetailScreen() {
 
   const onBlock = () => {
       setMenuOpen(false);
-      Alert.alert('Bloquer', 'Voulez-vous vraiment bloquer cet utilisateur ?', [
-          { text: 'Annuler', style: 'cancel' },
-          { text: 'Bloquer', style: 'destructive', onPress: async () => {
-              await blockUser(uid);
-              router.back();
-          }}
-      ]);
+      confirm('Bloquer', 'Voulez-vous vraiment bloquer cet utilisateur ?', async () => {
+          await blockUser(uid as string);
+          router.back();
+      });
   };
 
   const onReport = () => {
       setMenuOpen(false);
-      Alert.alert('Signaler', 'Raison du signalement :', [
-          { text: 'Spam', onPress: () => { reportUser(uid, 'spam'); showToast('Merci', 'Signalement envoyé.', 'success'); } },
-          { text: 'Faux profil', onPress: () => { reportUser(uid, 'fake'); showToast('Merci', 'Signalement envoyé.', 'success'); } },
-          { text: 'Contenu inapproprié', onPress: () => { reportUser(uid, 'inappropriate'); showToast('Merci', 'Signalement envoyé.', 'success'); } },
+      alert('Signaler', 'Raison du signalement :', [
+          { text: 'Spam', onPress: () => { reportUser(uid as string, 'spam'); showToast('Merci', 'Signalement envoyé.', 'success'); } },
+          { text: 'Faux profil', onPress: () => { reportUser(uid as string, 'fake'); showToast('Merci', 'Signalement envoyé.', 'success'); } },
+          { text: 'Contenu inapproprié', onPress: () => { reportUser(uid as string, 'inappropriate'); showToast('Merci', 'Signalement envoyé.', 'success'); } },
           { text: 'Annuler', style: 'cancel' }
       ]);
   };
@@ -234,16 +251,16 @@ export default function UserDetailScreen() {
         
         if (!check.allowed) {
             if (check.reason === 'insufficient_coins') {
-                Alert.alert(
+                alert(
                     'Pins insuffisants',
-                    'Vous n&apos;avez pas assez de pins pour débloquer ce profil.',
+                    'Vous n\'avez pas assez de pins pour débloquer ce profil.',
                     [
                         { text: 'Annuler', style: 'cancel' },
                         { text: 'Acheter des pins', onPress: () => router.push({ pathname: '/store', params: { tab: 'coins' } } as any) }
                     ]
                 );
             } else if (check.reason === 'subscription_required') {
-                Alert.alert(
+                alert(
                     'Abonnement recommandé', 
                     'Passez à Frensy PLUS pour des invitations quotidiennes, ou utilisez des pins.',
                     [
@@ -270,7 +287,7 @@ export default function UserDetailScreen() {
           setInviteModalVisible(false);
           
           if (reason === 'insufficient_coins') {
-               Alert.alert(
+               alert(
                   'Pins insuffisants', 
                   'Vous n\'avez pas assez de pins pour envoyer une invitation. Achetez des pins ou abonnez-vous !',
                   [
@@ -279,7 +296,7 @@ export default function UserDetailScreen() {
                   ]
                );
           } else if (reason === 'subscription_required') {
-              Alert.alert(
+              alert(
                   'Abonnement recommandé', 
                   'Passez à Frensy PLUS pour des invitations quotidiennes, ou utilisez des pins.',
                   [
@@ -388,43 +405,49 @@ export default function UserDetailScreen() {
                <Avatar 
                   uri={primaryUrl ?? undefined} 
                   initials={initials} 
-                  size={128} 
+                  size={140} 
                   ring 
                   ringColor="#F97316" 
                   ringWidth={3} 
                   focusX={profile?.avatarFocusX ?? 0.5} 
                   focusY={profile?.avatarFocusY ?? 0.5} 
                   zoom={typeof (profile as any)?.avatarZoom === 'number' ? (profile as any).avatarZoom : 1} 
-                  note={profile?.noteText ?? undefined} 
                 />
             </TouchableOpacity>
 
-            <View style={{ alignItems: 'center' }}>
-               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <Text style={s.nameLarge}>
+            <View style={{ alignItems: 'center', width: '100%', paddingHorizontal: 20 }}>
+               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, width: '100%' }}>
+                  <Text style={s.nameLarge} numberOfLines={1} adjustsFontSizeToFit>
                      {(profile?.firstName ?? 'Utilisateur')}{profile?.age ? `, ${profile.age}` : ''}
                   </Text>
+                  {profile?.accountType === 'group' && (
+                    <View style={{ backgroundColor: '#F97316', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8 }}>
+                       <Text style={{ color: '#fff', fontSize: 10, fontWeight: '800', textTransform: 'uppercase' }}>GROUPE</Text>
+                    </View>
+                  )}
                </View>
-               {profile?.accountType && (
-                 <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: profile.accountType === 'group' ? '#F97316' : '#333', paddingHorizontal: 12, paddingVertical: 4, borderRadius: 12, marginTop: 8 }}>
-                   <FontAwesome name={profile.accountType === 'group' ? 'users' : 'user'} size={12} color="#fff" style={{ marginRight: 6 }} />
-                   <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>{profile.accountType === 'group' ? 'Groupe' : 'Solo'}</Text>
-                 </View>
-               )}
+
                {profile?.accountType === 'group' && (
-                 <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
+                 <View style={{ flexDirection: 'row', gap: 8, marginTop: 8, justifyContent: 'center' }}>
                     {typeof profile.groupMembers === 'number' && (
-                        <View style={{ backgroundColor: 'rgba(255,255,255,0.1)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 }}>
-                           <Text style={{ color: '#ccc', fontSize: 12 }}>{profile.groupMembers} membres</Text>
-                        </View>
+                        <Text style={{ color: '#ccc', fontSize: 13 }}>{profile.groupMembers} membres</Text>
+                    )}
+                    {profile.groupComposition && (
+                        <Text style={{ color: '#888', fontSize: 13 }}>•</Text>
                     )}
                     {profile.groupComposition && (
                         <View style={{ flexDirection: 'row', gap: 6 }}>
-                            {profile.groupComposition.males > 0 && <Text style={{ color: '#90CAF9', fontSize: 12 }}>{profile.groupComposition.males} H</Text>}
-                            {profile.groupComposition.females > 0 && <Text style={{ color: '#F48FB1', fontSize: 12 }}>{profile.groupComposition.females} F</Text>}
-                            {profile.groupComposition.others > 0 && <Text style={{ color: '#A5D6A7', fontSize: 12 }}>{profile.groupComposition.others} A</Text>}
+                            {profile.groupComposition.males > 0 && <Text style={{ color: '#90CAF9', fontSize: 13 }}>{profile.groupComposition.males} H</Text>}
+                            {profile.groupComposition.females > 0 && <Text style={{ color: '#F48FB1', fontSize: 13 }}>{profile.groupComposition.females} F</Text>}
+                            {profile.groupComposition.others > 0 && <Text style={{ color: '#A5D6A7', fontSize: 13 }}>{profile.groupComposition.others} A</Text>}
                         </View>
                     )}
+                 </View>
+               )}
+
+               {profile?.noteText && (
+                 <View style={{ marginTop: 16, width: '100%' }}>
+                    <ExpandableText text={profile.noteText} maxLength={120} />
                  </View>
                )}
             </View>
@@ -448,29 +471,26 @@ export default function UserDetailScreen() {
                       setInviteModalVisible(true);
                    }
                 }} 
-                style={[s.actionBtn, { backgroundColor: hasMatch ? '#F97316' : (isInvitePending ? '#444' : '#fff') }]}
+                style={[s.actionBtn, { backgroundColor: hasMatch ? '#F97316' : (isInvitePending ? '#444' : '#fff'), flex: 2 }]}
                 disabled={isInvitePending && !hasMatch}
               >
                  <Text style={[s.actionBtnTxt, { color: hasMatch ? '#000' : (isInvitePending ? '#aaa' : '#000') }]}>
-                    {hasMatch ? 'Envoyer un message' : (isInvitePending ? 'Invitation envoyée' : 'Envoyer une invitation')}
+                    {hasMatch ? 'Message' : (isInvitePending ? 'En attente...' : 'Inviter')}
                  </Text>
               </TouchableOpacity>
               <TouchableOpacity 
                 onPress={onMapPress} 
                 style={[
                    s.actionBtn, 
-                   { backgroundColor: '#222', opacity: isLocationEnabled ? 1 : 0.5 }
+                   { backgroundColor: '#222', opacity: isLocationEnabled ? 1 : 0.5, flex: 1, flexDirection: 'row', gap: 8 }
                 ]}
                 disabled={!isLocationEnabled}
               >
+                 <FontAwesome name="map-marker" size={16} color={isLocationEnabled ? '#fff' : '#666'} />
                  <Text 
-                   style={s.actionBtnTxt} 
-                   numberOfLines={1} 
-                   adjustsFontSizeToFit 
-                   minimumFontScale={0.85} 
-                   ellipsizeMode="tail"
+                   style={[s.actionBtnTxt, { color: isLocationEnabled ? '#fff' : '#666', fontSize: 14 }]} 
                  >
-                    {isLocationEnabled ? 'Voir sur la carte' : 'Localisation non partagée'}
+                    Carte
                  </Text>
               </TouchableOpacity>
            </View>
@@ -492,11 +512,11 @@ export default function UserDetailScreen() {
            {/* Informations de profil */}
            <View>
             <Text style={s.sectionTitle}>Informations</Text>
-            <View style={[s.infoCard, { backgroundColor: 'rgba(255,255,255,0.05)', borderColor: 'rgba(255,255,255,0.1)' }]}> 
-              <Row label="Identité">{profile?.genderIdentity ? <Pills items={[profile.genderIdentity]} /> : <Empty muted="#666" />}</Row>
-              <Row label="Taille">{profile?.heightCm ? <Text style={{ color: '#fff' }}>{profile.heightCm} cm</Text> : <Empty muted="#666" />}</Row>
-              <Row label="Relations">{(profile?.interests ?? []).length ? <Pills items={(profile?.interests ?? []).map(i => i.toString())} /> : <Empty muted="#666" />}</Row>
-              <Row label="Intéressé(e)">{(profile?.genders ?? []).length ? <Pills items={(profile?.genders ?? []).map(g => g.toString())} /> : <Empty muted="#666" />}</Row>
+            <View style={s.infoCard}> 
+              <Row label="Identité">{profile?.genderIdentity ? <Pills items={[profile.genderIdentity]} /> : <Empty muted="#444" />}</Row>
+              <Row label="Taille">{profile?.heightCm ? <Text style={{ color: '#fff', fontSize: 15 }}>{profile.heightCm} cm</Text> : <Empty muted="#444" />}</Row>
+              <Row label="Relations">{(profile?.interests ?? []).length ? <Pills items={(profile?.interests ?? []).map(i => i.toString())} /> : <Empty muted="#444" />}</Row>
+              <Row label="Intéressé(e)">{(profile?.genders ?? []).length ? <Pills items={(profile?.genders ?? []).map(g => g.toString())} /> : <Empty muted="#444" />}</Row>
             </View>
            </View>
         </View>
@@ -597,7 +617,7 @@ export default function UserDetailScreen() {
               }}
               style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: '#333' }}
             >
-              <Text style={{ color: '#fff', fontSize: 16, fontWeight: '600', textAlign: 'center' }}>Signaler l'utilisateur</Text>
+              <Text style={{ color: '#fff', fontSize: 16, fontWeight: '600', textAlign: 'center' }}>Signaler l’utilisateur</Text>
             </TouchableOpacity>
             
             <TouchableOpacity 
@@ -695,8 +715,14 @@ export default function UserDetailScreen() {
                 }}
             >
                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                    <FontAwesome name="star" size={16} color="#000" />
-                    <Text style={{ color: '#000', fontWeight: '900' }}>Super Invitation ({FEATURE_COSTS.SUPER_INVITE} pins)</Text>
+                    {sendingInvite ? (
+                        <ActivityIndicator color="#000" />
+                    ) : (
+                        <>
+                            <FontAwesome name="star" size={16} color="#000" />
+                            <Text style={{ color: '#000', fontWeight: '900' }}>Super Invitation ({FEATURE_COSTS.SUPER_INVITE} pins)</Text>
+                        </>
+                    )}
                  </View>
             </TouchableOpacity>
           </View>
@@ -768,26 +794,22 @@ const s = StyleSheet.create({
     fontSize: 15,
   },
   sectionTitle: {
-    fontSize: 20,
-    fontWeight: '800',
+    fontSize: 18,
+    fontWeight: '700',
     color: '#fff',
     marginBottom: 16,
-    letterSpacing: 0.5,
+    letterSpacing: 0.2,
   },
   infoCard: {
-    borderRadius: 24,
-    padding: 24,
-    borderWidth: 1,
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderColor: 'rgba(255,255,255,0.1)',
+    // Transparent style
+    padding: 0,
   },
   label: {
-    fontSize: 13,
-    fontWeight: '700',
+    fontSize: 12,
+    fontWeight: '600',
     textTransform: 'uppercase',
     letterSpacing: 1,
-    marginBottom: 8,
-    color: 'rgba(255,255,255,0.5)',
+    color: '#666',
   },
   pills: {
     flexDirection: 'row',
@@ -795,16 +817,16 @@ const s = StyleSheet.create({
     gap: 8,
   },
   pill: {
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 12,
+    backgroundColor: '#222',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
+    borderColor: '#333',
   },
   pillTxt: {
-    color: '#e5e5e5',
-    fontSize: 14,
-    fontWeight: '600',
+    color: '#ccc',
+    fontSize: 13,
+    fontWeight: '500',
   },
 });

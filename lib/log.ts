@@ -1,3 +1,3 @@
 export function logError(...args: any[]): void {
-  try { console.error(...args) } catch {}
+  try { if (__DEV__) console.error(...args) } catch {}
 }

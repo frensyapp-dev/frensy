@@ -1,8 +1,8 @@
-import { router } from 'expo-router';
-import { View, Text, TouchableOpacity, StyleSheet, ScrollView } from 'react-native';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
-import { Colors } from '../../constants/Colors';
+import { router } from 'expo-router';
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Colors } from '../../constants/Colors';
 
 export default function TermsOfService() {
   const C = Colors['dark'];
@@ -25,7 +25,7 @@ export default function TermsOfService() {
 
         <Section title="1. Objet et Acceptation" C={C}>
           <Text style={{ color: C.text }}>
-            Frensy est une application de rencontre et de messagerie sociale. En créant un compte ou en utilisant l’application, tu acceptes sans réserve les présentes Conditions Générales d&apos;Utilisation (CGU).
+            Frensy est une application de mise en relation locale, de sorties et de messagerie sociale fondee sur la proximite, les centres d&apos;interet et les groupes. En creant un compte ou en utilisant l&apos;application, tu acceptes sans reserve les presentes Conditions Generales d&apos;Utilisation (CGU).
           </Text>
         </Section>
 
@@ -69,7 +69,7 @@ export default function TermsOfService() {
         <Section title="7. Responsabilité" C={C}>
           <Text style={{ color: C.text }}>
             Frensy fournit le service &quot;tel quel&quot;. Nous ne garantissons pas que l&apos;application sera toujours ininterrompue ou exempte d&apos;erreurs.
-            Nous ne sommes pas responsables des actions des utilisateurs hors de l&apos;application. Sois prudent lors de tes rencontres réelles.
+            Nous ne sommes pas responsables des actions des utilisateurs hors de l&apos;application. Sois prudent lors de tes sorties et activites en personne.
           </Text>
         </Section>
 

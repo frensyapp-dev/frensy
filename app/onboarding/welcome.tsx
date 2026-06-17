@@ -1,12 +1,15 @@
+import FontAwesome from '@expo/vector-icons/FontAwesome'
 import * as Haptics from 'expo-haptics'
 import { LinearGradient } from 'expo-linear-gradient'
 import { router, Stack } from 'expo-router'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { Animated, Dimensions, Easing, Image, Linking, StyleSheet, Text, View } from 'react-native'
 import { GradientButton } from '../../components/ui/GradientButton'
 import { Colors } from '../../constants/Colors'
 
 const { width } = Dimensions.get('window');
+const MAX_CONTENT_WIDTH = 500;
+const ORB_SIZE = Math.min(width, 600);
 
 export default function OnboardingWelcome() {
   const C = Colors['dark']
@@ -49,7 +52,7 @@ export default function OnboardingWelcome() {
 
   const goNext = () => {
     try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium) } catch {}
-    router.replace('/onboarding/account-type' as any)
+    router.replace('/onboarding/how-it-works' as any)
   }
 
   const scale = glow.interpolate({ inputRange: [0, 1], outputRange: [1, 1.05] })
@@ -81,8 +84,27 @@ export default function OnboardingWelcome() {
                 </View>
 
                 <Animated.Text style={[s.subtitle, { opacity: fadeAnim }]}>
-                    Rencontre. Discute. Vibre.
+                    Rencontre. Partage. Vis.
                 </Animated.Text>
+
+                <Animated.View style={[s.pitchCard, { opacity: fadeAnim }]}>
+                  <Text style={s.pitchTitle}>Frensy, c’est pour</Text>
+                  <View style={{ gap: 12, marginVertical: 10 }}>
+                    <View style={s.pitchRow}>
+                        <FontAwesome name="map-marker" size={18} color={C.tint} style={{ width: 24 }} />
+                        <Text style={s.pitchLine}>Découvrir des personnes proches</Text>
+                    </View>
+                    <View style={s.pitchRow}>
+                        <FontAwesome name="heart" size={16} color={C.tint} style={{ width: 24 }} />
+                        <Text style={s.pitchLine}>Se connecter via intérêts et groupes</Text>
+                    </View>
+                    <View style={s.pitchRow}>
+                        <FontAwesome name="comments" size={18} color={C.tint} style={{ width: 24 }} />
+                        <Text style={s.pitchLine}>Organiser des sorties et discuter</Text>
+                    </View>
+                  </View>
+                  <Text style={s.pitchHint}>Ce n’est pas un catalogue de rencontres.</Text>
+                </Animated.View>
             </View>
 
             <Animated.View style={[s.footer, { opacity: fadeAnim }]}>
@@ -98,14 +120,23 @@ export default function OnboardingWelcome() {
 }
 
 const s = StyleSheet.create({
-  container: { flex: 1, alignItems: 'center', justifyContent: 'space-between', paddingVertical: 60, paddingHorizontal: 24 },
+  container: { 
+    flex: 1, 
+    alignItems: 'center', 
+    justifyContent: 'space-between', 
+    paddingVertical: 60, 
+    paddingHorizontal: 24,
+    width: '100%',
+    maxWidth: MAX_CONTENT_WIDTH,
+    alignSelf: 'center',
+  },
   glowOrb: {
       position: 'absolute',
       top: -100,
       left: -100,
-      width: width,
-      height: width,
-      borderRadius: width / 2,
+      width: ORB_SIZE,
+      height: ORB_SIZE,
+      borderRadius: ORB_SIZE / 2,
       backgroundColor: Colors.dark.overlay,
   },
   centerContent: { alignItems: 'center', justifyContent: 'center', flex: 1 },
@@ -127,6 +158,40 @@ const s = StyleSheet.create({
   titleRow: { flexDirection: 'row', gap: 2 },
   title: { fontSize: 36, fontWeight: '900', color: Colors.dark.text, letterSpacing: 4 },
   subtitle: { marginTop: 16, fontSize: 16, color: 'rgba(255,255,255,0.6)', letterSpacing: 1 },
+  pitchCard: {
+    marginTop: 18,
+    width: '100%',
+    maxWidth: 420,
+    borderRadius: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  pitchTitle: {
+    color: '#fff',
+    fontWeight: '900',
+    fontSize: 14,
+    marginBottom: 12,
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+  },
+  pitchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  pitchLine: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 15,
+    lineHeight: 20,
+  },
+  pitchHint: {
+    marginTop: 8,
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 12,
+    lineHeight: 16,
+  },
   footer: { width: '100%', alignItems: 'center', gap: 16 },
   terms: { color: 'rgba(255,255,255,0.3)', fontSize: 12 }
 })

@@ -17,12 +17,17 @@ type Props = {
   zoom?: number;   // facteur de zoom (>=1), par défaut 1.0
   useRNImage?: boolean; // utilise l'Image RN (utile dans les markers de map)
   blurRadius?: number; // flou
+  subscription?: 'FREE' | 'PLUS' | 'PRO';
 };
 
-export default function Avatar({ uri, initials, size = 40, style, ring = false, ringColor = '#F97316', ringWidth = 2, focusX = 0.5, focusY = 0.5, note, zoom = 1, useRNImage = false, blurRadius }: Props) {
+export default function Avatar({ uri, initials, size = 40, style, ring = false, ringColor = '#F97316', ringWidth = 2, focusX = 0.5, focusY = 0.5, note, zoom = 1, useRNImage = false, blurRadius, subscription }: Props) {
   const [error, setError] = React.useState(false);
   // Reset error if uri changes
   React.useEffect(() => { setError(false); }, [uri]);
+
+  const finalRingColor = subscription === 'PRO' ? '#FFD700' : (subscription === 'PLUS' ? '#F97316' : ringColor);
+  const finalRingWidth = (subscription === 'PRO' || subscription === 'PLUS') ? 3 : ringWidth;
+  const isPremium = subscription === 'PRO' || subscription === 'PLUS';
 
   // Utilise expo-image pour un crop "cover" et une position de contenu ajustable
   // contentPosition accepte des pourcentages X Y (ex: '50% 30%')
@@ -40,7 +45,7 @@ export default function Avatar({ uri, initials, size = 40, style, ring = false, 
     <View style={[
       styles.wrap,
       { width: size, height: size, borderRadius: size/2 },
-      ring && { borderWidth: ringWidth, borderColor: ringColor },
+      (ring || isPremium) && { borderWidth: finalRingWidth, borderColor: finalRingColor },
       style
     ]}>
       {uri && !error ? (

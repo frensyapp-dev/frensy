@@ -33,8 +33,8 @@ const STEPS_CONTENT: Record<TutorialStep, { title: string; message: string; icon
     icon: "🛡️"
   },
   first_store_visit: {
-    title: "Boost tes rencontres",
-    message: "Utilise tes Pins pour envoyer des messages directs ou te mettre en avant.",
+    title: "Booste ta visibilite",
+    message: "Utilise tes Pins pour envoyer une invitation directe ou mettre ton profil en avant.",
     icon: "💎"
   }
 };

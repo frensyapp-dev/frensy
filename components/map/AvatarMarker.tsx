@@ -11,6 +11,7 @@ type Props = {
   name?: string;
   distance?: number;
   isApproximate?: boolean;
+  subscription?: 'FREE' | 'PLUS' | 'PRO';
 };
 
 function AvatarMarker({ 
@@ -20,7 +21,8 @@ function AvatarMarker({
   onPress, 
   name, 
   distance, 
-  isApproximate = true 
+  isApproximate = true,
+  subscription
 }: Props) {
   const distanceText = useMemo(() => {
     if (distance === undefined) return isApproximate ? 'Position approx.' : 'Position précise';
@@ -30,7 +32,7 @@ function AvatarMarker({
   if (Platform.OS === 'web') {
     return (
       <View style={{ alignItems: 'center' }}>
-        <Avatar uri={uri} initials={initials} size={38} ring />
+        <Avatar uri={uri} initials={initials} size={38} ring subscription={subscription} />
         {name && (
           <View style={styles.badge}>
             <Text style={styles.name}>{name}</Text>
@@ -44,7 +46,7 @@ function AvatarMarker({
   return (
     <Marker coordinate={coordinate} onPress={onPress} tracksViewChanges={false}>
       <View style={styles.container}>
-        <Avatar uri={uri} initials={initials} size={38} ring />
+        <Avatar uri={uri} initials={initials} size={38} ring subscription={subscription} />
         {name && (
           <View style={styles.badge}>
             <Text style={styles.name}>{name}</Text>

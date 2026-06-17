@@ -108,16 +108,18 @@ async function userExists(uid: string): Promise<boolean> {
 
 async function deleteSubcollection(path: string): Promise<number> {
   const colRef = db.collection(path);
-  const docs = await colRef.listDocuments();
   let count = 0;
-  if (docs.length === 0) return 0;
-  const batch = db.batch();
-  for (const d of docs) {
-    batch.delete(d);
-    count++;
+  while (true) {
+    const snap = await colRef.limit(450).get();
+    if (snap.empty) return count;
+    const batch = db.batch();
+    for (const d of snap.docs) {
+      batch.delete(d.ref);
+      count++;
+    }
+    await batch.commit();
+    if (snap.size < 450) return count;
   }
-  await batch.commit();
-  return count;
 }
 
 async function cleanupMatchByChatId(chatId: string): Promise<{deletedMatch:boolean; deletedMessages:number; deletedStatus:number}> {
@@ -133,6 +135,16 @@ async function cleanupMatchByChatId(chatId: string): Promise<{deletedMatch:boole
     }
   } catch (e) {
     logger.error("Failed deleting match", { chatId, e });
+  }
+  try {
+    deletedMessages += await deleteSubcollection(`matches/${chatId}/messages`);
+  } catch (e) {
+    logger.error("Failed deleting match messages", { chatId, e });
+  }
+  try {
+    deletedStatus += await deleteSubcollection(`matches/${chatId}/status`);
+  } catch (e) {
+    logger.error("Failed deleting match status", { chatId, e });
   }
   try {
     deletedMessages = await deleteSubcollection(`messages/${chatId}/items`);
@@ -160,62 +172,44 @@ async function cleanupOrphansImpl(): Promise<{matchesChecked:number; matchesRemo
   let matchesRemoved = 0;
   let convsRemoved = 0;
 
-  const matches = await db.collection("matches").listDocuments();
-  for (const m of matches) {
-    const snap = await m.get();
-    matchesChecked++;
-    const data = snap.data() as any;
-    const users: string[] = Array.isArray(data?.users) ? data.users : [];
-    if (users.length !== 2) {
-      const res = await cleanupMatchByChatId(m.id);
-      matchesRemoved += res.deletedMatch ? 1 : 0;
-      convsRemoved += res.deletedMessages + res.deletedStatus;
-      continue;
-    }
-    const [u1, u2] = users;
-    const exists1 = await userExists(u1);
-    const exists2 = await userExists(u2);
-    if (!exists1 || !exists2) {
-      const res = await cleanupMatchByChatId(m.id);
-      matchesRemoved += res.deletedMatch ? 1 : 0;
-      convsRemoved += res.deletedMessages + res.deletedStatus;
-    }
-  }
+  const existsCache = new Map<string, boolean>();
+  const existsChecked = new Map<string, boolean>();
+  const checkUser = async (uid: string): Promise<boolean> => {
+    if (existsChecked.has(uid)) return existsCache.get(uid) === true;
+    const ok = await userExists(uid);
+    existsChecked.set(uid, true);
+    existsCache.set(uid, ok);
+    return ok;
+  };
 
-  const convRoots = await db.collection("messages").listDocuments();
-  for (const c of convRoots) {
-    const chatId = c.id;
-    const parts = chatId.split("_");
-    if (parts.length !== 2) {
-      const res = await cleanupMatchByChatId(chatId);
-      convsRemoved += res.deletedMessages + res.deletedStatus;
-      continue;
+  let page = 0;
+  let lastDocId: string | null = null;
+  while (true) {
+    page++;
+    let q = db.collection("matches").select("users").orderBy(admin.firestore.FieldPath.documentId()).limit(500);
+    if (lastDocId) q = q.startAfter(lastDocId);
+    const snap = await q.get();
+    if (snap.empty) break;
+    for (const docSnap of snap.docs) {
+      matchesChecked++;
+      const data = docSnap.data() as any;
+      const users: string[] = Array.isArray(data?.users) ? data.users : [];
+      if (users.length !== 2) {
+        const res = await cleanupMatchByChatId(docSnap.id);
+        matchesRemoved += res.deletedMatch ? 1 : 0;
+        convsRemoved += res.deletedMessages + res.deletedStatus;
+        continue;
+      }
+      const [u1, u2] = users;
+      const [exists1, exists2] = await Promise.all([checkUser(u1), checkUser(u2)]);
+      if (!exists1 || !exists2) {
+        const res = await cleanupMatchByChatId(docSnap.id);
+        matchesRemoved += res.deletedMatch ? 1 : 0;
+        convsRemoved += res.deletedMessages + res.deletedStatus;
+      }
     }
-    const [uidA, uidB] = parts;
-    const existsA = await userExists(uidA);
-    const existsB = await userExists(uidB);
-    if (!existsA || !existsB) {
-      const res = await cleanupMatchByChatId(chatId);
-      convsRemoved += res.deletedMessages + res.deletedStatus;
-    }
-  }
-
-  const statusRoots = await db.collection("chatStatus").listDocuments();
-  for (const s of statusRoots) {
-    const chatId = s.id;
-    const parts = chatId.split("_");
-    const [uidA, uidB] = parts;
-    if (parts.length !== 2) {
-      const res = await cleanupMatchByChatId(chatId);
-      convsRemoved += res.deletedStatus;
-      continue;
-    }
-    const existsA = await userExists(uidA);
-    const existsB = await userExists(uidB);
-    if (!existsA || !existsB) {
-      const res = await cleanupMatchByChatId(chatId);
-      convsRemoved += res.deletedStatus;
-    }
+    lastDocId = snap.docs[snap.docs.length - 1].id;
+    if (snap.size < 500) break;
   }
 
   return { matchesChecked, matchesRemoved, convsRemoved };
@@ -249,26 +243,16 @@ export const authCleanupOnDelete = functions.runWith({ maxInstances: 5 }).auth.u
   logger.info("authCleanupOnDelete triggered", { uid });
   try {
     await db.doc(`users/${uid}`).delete().catch(() => {});
+    await db.doc(`users/${uid}/private/settings`).delete().catch(() => {});
     await db.doc(`positions/${uid}`).delete().catch(() => {});
+    await db.doc(`blocks/${uid}`).delete().catch(() => {});
+    await deleteSubcollection(`blocks/${uid}/users`).catch(() => {});
+    await db.doc(`moderation_photos/${uid}`).delete().catch(() => {});
     const matchQuery = await db.collection("matches").where("users", "array-contains", uid).get();
     for (const docSnap of matchQuery.docs) {
       const chatId = docSnap.id;
       const res = await cleanupMatchByChatId(chatId);
       logger.info("Deleted match & convs for", { chatId, res });
-    }
-    const convRoots = await db.collection("messages").listDocuments();
-    for (const c of convRoots) {
-      if (c.id.includes(uid)) {
-        const res = await cleanupMatchByChatId(c.id);
-        logger.info("Deleted messages for", { chatId: c.id, res });
-      }
-    }
-    const statusRoots = await db.collection("chatStatus").listDocuments();
-    for (const s of statusRoots) {
-      if (s.id.includes(uid)) {
-        const res = await cleanupMatchByChatId(s.id);
-        logger.info("Deleted chatStatus for", { chatId: s.id, res });
-      }
     }
     const reqFrom = await db.collection('chatRequests').where('from', '==', uid).get();
     for (const d of reqFrom.docs) { await d.ref.delete().catch(() => {}); }
@@ -341,8 +325,11 @@ export const sendPushOnNewMessage = functions.firestore
       if (!recipientId) { logger.warn('sendPushOnNewMessage recipient not found', { matchId, users, senderId }); return; }
       if (await isBlockedBetween(senderId, recipientId)) { logger.info('sendPushOnNewMessage skip: blocked', { senderId, recipientId, matchId }); return; }
       const userSnap = await db.doc(`users/${recipientId}`).get();
-      const token = (userSnap.data() as any)?.expoPushToken || null;
-      const prefs = (userSnap.data() as any)?.notifications || {};
+      const privateSnap = await db.doc(`users/${recipientId}/private/settings`).get();
+      const privateData = (privateSnap.exists ? privateSnap.data() : {}) as any;
+      const publicData = (userSnap.exists ? userSnap.data() : {}) as any;
+      const token = privateData?.expoPushToken || publicData?.expoPushToken || null;
+      const prefs = privateData?.notifications || publicData?.notifications || {};
       const allow = prefs?.newMessage !== false;
       if (!token || !allow) { logger.info('sendPushOnNewMessage skip (no token or disabled)', { recipientId, hasToken: !!token, allow }); return; }
       
@@ -375,8 +362,11 @@ export const sendPushOnNewMatch = functions.runWith({ maxInstances: 5 }).firesto
       if (users.length !== 2) { logger.warn('sendPushOnNewMatch invalid users', { matchId, users }); return; }
       for (const recipientId of users) {
         const userSnap = await db.doc(`users/${recipientId}`).get();
-        const token = (userSnap.data() as any)?.expoPushToken || null;
-        const prefs = (userSnap.data() as any)?.notifications || {};
+        const privateSnap = await db.doc(`users/${recipientId}/private/settings`).get();
+        const privateData = (privateSnap.exists ? privateSnap.data() : {}) as any;
+        const publicData = (userSnap.exists ? userSnap.data() : {}) as any;
+        const token = privateData?.expoPushToken || publicData?.expoPushToken || null;
+        const prefs = privateData?.notifications || publicData?.notifications || {};
         const allow = prefs?.matches !== false;
         if (!token || !allow) { logger.info('sendPushOnNewMatch skip', { recipientId, hasToken: !!token, allow }); continue; }
         const otherId = users.find((u) => u !== recipientId);
@@ -434,9 +424,11 @@ export const sendPushOnChatInvitation = functions.firestore
       if (await isBlockedBetween(from, to)) { return; }
 
       const userSnap = await db.doc(`users/${to}`).get();
-      const userData = userSnap.data() as any;
-      const token = userData?.expoPushToken || null;
-      const prefs = userData?.notifications || {};
+      const privateSnap = await db.doc(`users/${to}/private/settings`).get();
+      const privateData = (privateSnap.exists ? privateSnap.data() : {}) as any;
+      const publicData = (userSnap.exists ? userSnap.data() : {}) as any;
+      const token = privateData?.expoPushToken || publicData?.expoPushToken || null;
+      const prefs = privateData?.notifications || publicData?.notifications || {};
       const allow = prefs?.invitations !== false;
 
       if (!token || !allow) return;
@@ -461,7 +453,7 @@ export const sendPushOnChatInvitation = functions.firestore
       // const json = await res.json().catch(() => ({}));
       // logger.info('sendPushOnChatInvitation sent', { to, status: res.status });
     } catch (e) { 
-      // logger.error('sendPushOnChatInvitation failed', e as any); 
+      logger.error('sendPushOnChatInvitation failed', { requestId: context.params.requestId, e });
     }
   });
 
@@ -475,21 +467,68 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): nu
 export const notifyNearbyPeopleSnapshot = functions.runWith({ maxInstances: 5 }).pubsub.schedule('every 30 minutes').onRun(async () => {
   try {
     const now = Date.now(); const MAX_RECENCY_MS = 35 * 60 * 1000; const RADIUS_KM = 2.0;
-    const posDocs = await db.collection('positions').listDocuments();
+    const cutoff = now - MAX_RECENCY_MS;
+    const posSnap = await db.collection('positions').select('uid', 'lat', 'lng', 'updatedAtMs').where('updatedAtMs', '>=', cutoff).get();
     const positions: Array<{ uid: string; lat: number; lng: number; updatedAtMs: number }> = [];
-    for (const d of posDocs) {
-      const snap = await d.get(); const data = snap.data() as any; if (!data) continue;
-      const updatedAtMs = Number(data.updatedAtMs ?? 0);
+    for (const d of posSnap.docs) {
+      const data = d.data() as any;
+      const uid = String(data?.uid || d.id);
+      const lat = Number(data?.lat);
+      const lng = Number(data?.lng);
+      const updatedAtMs = Number(data?.updatedAtMs ?? 0);
+      if (!uid || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
       if (!Number.isFinite(updatedAtMs) || now - updatedAtMs > MAX_RECENCY_MS) continue;
-      positions.push({ uid: String(data.uid), lat: Number(data.lat), lng: Number(data.lng), updatedAtMs });
+      positions.push({ uid, lat, lng, updatedAtMs });
     }
+
+    const CELL = 0.02;
+    const buckets = new Map<string, Array<{ uid: string; lat: number; lng: number; updatedAtMs: number }>>();
+    const keyFor = (lat: number, lng: number) => `${Math.floor(lat / CELL)}_${Math.floor(lng / CELL)}`;
+    for (const p of positions) {
+      const k = keyFor(p.lat, p.lng);
+      const arr = buckets.get(k);
+      if (arr) arr.push(p);
+      else buckets.set(k, [p]);
+    }
+
+    const blocksCache = new Map<string, Set<string>>();
+    const getBlockedSet = async (uid: string): Promise<Set<string>> => {
+      const cached = blocksCache.get(uid);
+      if (cached) return cached;
+      const snap = await db.collection('blocks').doc(uid).collection('users').select().get().catch(() => null as any);
+      const set = new Set<string>();
+      if (snap && snap.docs) {
+        for (const d of snap.docs) set.add(d.id);
+      }
+      blocksCache.set(uid, set);
+      return set;
+    };
+
     for (const me of positions) {
-      const profSnap = await db.doc(`users/${me.uid}`).get(); const prof = profSnap.data() as any;
-      const token = prof?.expoPushToken || null; const prefs = prof?.notifications || {};
+      const [profSnap, privSnap] = await Promise.all([
+        db.doc(`users/${me.uid}`).get(),
+        db.doc(`users/${me.uid}/private/settings`).get()
+      ]);
+      const priv = (privSnap.exists ? privSnap.data() : {}) as any;
+      const pub = (profSnap.exists ? profSnap.data() : {}) as any;
+      const token = priv?.expoPushToken || pub?.expoPushToken || null;
+      const prefs = priv?.notifications || pub?.notifications || {};
       const allow = prefs?.peopleNearby !== false; if (!token || !allow) continue; let count = 0;
-      for (const other of positions) {
-        if (other.uid === me.uid) continue; if (await isBlockedBetween(me.uid, other.uid)) continue;
-        const dist = haversineKm(me.lat, me.lng, other.lat, other.lng); if (dist <= RADIUS_KM) count++;
+      const myBlocked = await getBlockedSet(me.uid);
+      const baseX = Math.floor(me.lat / CELL);
+      const baseY = Math.floor(me.lng / CELL);
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          const k = `${baseX + dx}_${baseY + dy}`;
+          const arr = buckets.get(k);
+          if (!arr) continue;
+          for (const other of arr) {
+            if (other.uid === me.uid) continue;
+            if (myBlocked.has(other.uid)) continue;
+            const dist = haversineKm(me.lat, me.lng, other.lat, other.lng);
+            if (dist <= RADIUS_KM) count++;
+          }
+        }
       }
       if (count <= 0) continue;
       const payload = { to: token, sound: 'default', title: 'Autour de toi', body: `Il y a ${count} nouvelles personnes autour de vous`, data: { type: 'nearby', count } };
@@ -740,66 +779,275 @@ export const onSwipeCreated = functions.runWith({ maxInstances: 5 }).firestore
     }
   });
 
-export const processPurchase = functions.https.onCall(async (data, context) => {
+export const processPurchase = functions.runWith({ secrets: ['REVENUECAT_SECRET_KEY'] }).https.onCall(async (data, context) => {
     if (!context.auth) {
         throw new functions.https.HttpsError('unauthenticated', 'Authentification requise');
     }
     const uid = context.auth.uid;
-    const { type, itemId } = data; // type: 'pins' | 'subscription'
-    
-    // SECURITY: Validate inputs to prevent arbitrary granting
-    const validPinPacks = ['coins_30', 'coins_120', 'coins_300', 'coins_1000', 'coins_3500'];
-    const validSubs = ['plus_1m', 'plus_1y', 'pro_1m', 'pro_1y']; // Add your actual IDs here
-    
-    // Allow any ID starting with these prefixes for flexibility during test/dev if IDs change
-    const isValidItem = 
-        validPinPacks.includes(itemId) || 
-        validSubs.includes(itemId) ||
-        (itemId && (itemId.startsWith('coins_') || itemId.startsWith('plus_') || itemId.startsWith('pro_')));
+    try {
+        const res = await syncRevenueCatPurchasesImpl(uid);
+        return { success: true, ...res };
+    } catch (e: any) {
+        const msg = e?.message || 'Sync RevenueCat échoué';
+        logger.error('processPurchase failed', { uid, msg });
+        throw new functions.https.HttpsError('internal', msg);
+    }
+});
 
-    if (!isValidItem) {
-        logger.warn('Invalid purchase attempt', { uid, itemId });
-        throw new functions.https.HttpsError('invalid-argument', 'Produit invalide');
+type RevenueCatSubscriber = {
+    subscriptions?: Record<string, { expires_date_ms?: number | string | null }>;
+    entitlements?: Record<string, { expires_date_ms?: number | string | null; product_identifier?: string }>;
+    non_subscriptions?: Record<string, Array<{ id?: string; transaction_id?: string; purchase_date_ms?: number | string | null }>>;
+};
+
+async function fetchRevenueCatSubscriber(appUserId: string): Promise<RevenueCatSubscriber> {
+    const secret = process.env.REVENUECAT_SECRET_KEY;
+    if (!secret) {
+        throw new Error('REVENUECAT_SECRET_KEY manquant côté serveur');
+    }
+    const url = `https://api.revenuecat.com/v1/subscribers/${encodeURIComponent(appUserId)}`;
+    const r = await fetch(url, {
+        method: 'GET',
+        headers: {
+            Authorization: `Bearer ${secret}`,
+            'Content-Type': 'application/json',
+        },
+    });
+    if (!r.ok) {
+        const body = await r.text().catch(() => '');
+        throw new Error(`RevenueCat API error ${r.status}: ${body || r.statusText}`);
+    }
+    const json = await r.json();
+    const sub = (json as any)?.subscriber || {};
+    return sub as RevenueCatSubscriber;
+}
+
+function parseMs(v: any): number {
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string') {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+    }
+    return 0;
+}
+
+function pinsAmountForProduct(productId: string): number {
+    const raw = typeof productId === 'string' ? productId : '';
+    const normalized = raw.trim().toLowerCase();
+    
+    // Security: explicitly ignore subscription IDs to prevent giving pins instead of/in addition to sub
+    if (normalized.includes('plus') || normalized.includes('pro') || normalized.includes('sub')) {
+        return 0;
     }
 
-    // TODO: In production, verify the purchase token with Apple/Google/RevenueCat API here.
-    // For now, we trust the client for "Test Phase" as requested, but we validate the Item ID exists.
-    // Recommended: Use RevenueCat Webhooks to handle entitlements server-side securely.
-    
-    logger.info('Processing purchase (Trusted/Test Mode)', { uid, type, itemId });
-    
-    const privateRef = db.doc(`users/${uid}/private/settings`);
-    
-    if (type === 'pins') {
-        const amount = itemId === 'coins_30' ? 30 : 
-                       itemId === 'coins_120' ? 120 :
-                       itemId === 'coins_300' ? 300 :
-                       itemId === 'coins_1000' ? 1000 : 
-                       itemId === 'coins_3500' ? 3500 : 0;
+    const suffix = normalized.includes('.') ? (normalized.split('.').pop() || normalized) : normalized;
+
+    if (suffix === 'coins_30' || normalized.endsWith('coins_30')) return 30;
+    if (suffix === 'coins_120' || normalized.endsWith('coins_120')) return 120;
+    if (suffix === 'coins_300' || normalized.endsWith('coins_300')) return 300;
+    if (suffix === 'coins_1000' || normalized.endsWith('coins_1000')) return 1000;
+    if (suffix === 'coins_3500' || normalized.endsWith('coins_3500')) return 3500;
+    return 0;
+}
+
+function computeSubscriptionFromRevenueCat(subscriber: RevenueCatSubscriber): { tier: 'FREE' | 'PLUS' | 'PRO'; expiryMs: number } {
+    const now = Date.now();
+    let bestTier: 'FREE' | 'PLUS' | 'PRO' = 'FREE';
+    let bestExpiryMs = 0;
+
+    // 1. Check Entitlements (Best practice)
+    const entitlements = subscriber.entitlements || {};
+    for (const [entId, e] of Object.entries(entitlements)) {
+        const rawExp = e?.expires_date_ms;
+        const exp = rawExp ? parseMs(rawExp) : null;
         
-        // Fallback for custom amounts if needed, or strict check above
-        if (amount > 0) {
-            await privateRef.set({
-                pins: admin.firestore.FieldValue.increment(amount),
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            }, { merge: true });
+        // Subscription is active if expiry is null (lifetime) or in the future
+        const isActive = exp === null || exp > now;
+        if (!isActive) continue;
+
+        const normalizedId = entId.toLowerCase();
+        let tier: 'PLUS' | 'PRO' | null = null;
+        
+        if (normalizedId.includes('pro') || normalizedId.includes('premium')) {
+            tier = 'PRO';
+        } else if (normalizedId.includes('plus')) {
+            tier = 'PLUS';
         }
-    } else if (type === 'subscription') {
-        const tier = itemId.includes('pro') ? 'PRO' : 'PLUS';
-        const durationDays = (itemId.includes('yearly') || itemId.includes('1y')) ? 365 : 30;
+
+        if (!tier) continue;
+
+        if (tier === 'PRO') {
+            if (bestTier !== 'PRO' || (exp !== null && (bestExpiryMs === 0 || exp > bestExpiryMs))) {
+                bestTier = 'PRO';
+                bestExpiryMs = exp || 0;
+            } else if (exp === null) {
+                bestTier = 'PRO';
+                bestExpiryMs = 0; // 0 represents lifetime/no expiry in our system
+            }
+        } else if (tier === 'PLUS') {
+            if (bestTier === 'FREE' || (bestTier === 'PLUS' && (exp !== null && (bestExpiryMs === 0 || exp > bestExpiryMs)))) {
+                bestTier = 'PLUS';
+                bestExpiryMs = exp || 0;
+            } else if (bestTier === 'FREE' && exp === null) {
+                bestTier = 'PLUS';
+                bestExpiryMs = 0;
+            }
+        }
+    }
+
+    // 2. Fallback to Subscriptions (Product ID matching)
+    const subs = subscriber.subscriptions || {};
+    for (const [productId, s] of Object.entries(subs)) {
+        const rawExp = (s as any)?.expires_date_ms;
+        const exp = rawExp ? parseMs(rawExp) : null;
         
-        await db.doc(`users/${uid}`).update({
-             subscription: tier,
-             subscriptionExpiryMs: Date.now() + durationDays * 24 * 60 * 60 * 1000 
-        });
-        // Also update private settings just in case
-        await privateRef.set({
-             subscription: tier,
-             updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        const isActive = exp === null || exp > now;
+        if (!isActive) continue;
+
+        const normalizedId = productId.toLowerCase();
+        let tier: 'PLUS' | 'PRO' | null = null;
+        
+        if (normalizedId.includes('pro') || normalizedId.includes('premium')) {
+            tier = 'PRO';
+        } else if (normalizedId.includes('plus')) {
+            tier = 'PLUS';
+        }
+
+        if (!tier) continue;
+
+        if (tier === 'PRO') {
+            if (bestTier !== 'PRO' || (exp !== null && (bestExpiryMs === 0 || exp > bestExpiryMs))) {
+                bestTier = 'PRO';
+                bestExpiryMs = exp || 0;
+            } else if (exp === null) {
+                bestTier = 'PRO';
+                bestExpiryMs = 0;
+            }
+        } else if (tier === 'PLUS') {
+            if (bestTier === 'FREE' || (bestTier === 'PLUS' && (exp !== null && (bestExpiryMs === 0 || exp > bestExpiryMs)))) {
+                bestTier = 'PLUS';
+                bestExpiryMs = exp || 0;
+            } else if (bestTier === 'FREE' && exp === null) {
+                bestTier = 'PLUS';
+                bestExpiryMs = 0;
+            }
+        }
+    }
+
+    return { tier: bestTier, expiryMs: bestExpiryMs };
+}
+
+async function syncRevenueCatPurchasesImpl(uid: string): Promise<{ grantedPins: number; subscription: { tier: 'FREE' | 'PLUS' | 'PRO'; expiryMs: number } }> {
+    const subscriber = await fetchRevenueCatSubscriber(uid);
+    const subscription = computeSubscriptionFromRevenueCat(subscriber);
+
+    const userRef = db.doc(`users/${uid}`);
+    const privateRef = db.doc(`users/${uid}/private/settings`);
+    const posRef = db.doc(`positions/${uid}`);
+
+    // Update subscription info in a single batch
+    const subBatch = db.batch();
+    const subUpdate = {
+        subscription: subscription.tier,
+        subscriptionExpiryMs: subscription.expiryMs || 0,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    subBatch.set(privateRef, subUpdate, { merge: true });
+    subBatch.set(userRef, subUpdate, { merge: true });
+
+    // Update positions doc if it exists so the map badge updates immediately
+    const posSnap = await posRef.get();
+    if (posSnap.exists) {
+        subBatch.set(posRef, {
+            subscription: subscription.tier,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
     }
-    
-    return { success: true };
+    await subBatch.commit();
+
+    const nonSubs = subscriber.non_subscriptions || {};
+    const grantCandidates: Array<{ key: string; productId: string; amount: number }> = [];
+
+    for (const [productId, entries] of Object.entries(nonSubs)) {
+        const amount = pinsAmountForProduct(productId);
+        if (!amount) continue;
+        if (!Array.isArray(entries)) continue;
+        for (const e of entries) {
+            const key =
+                (typeof (e as any)?.transaction_id === 'string' && (e as any).transaction_id) ||
+                (typeof (e as any)?.id === 'string' && (e as any).id) ||
+                `${productId}:${parseMs((e as any)?.purchase_date_ms) || 'unknown'}`;
+            grantCandidates.push({ key, productId, amount });
+        }
+    }
+
+    let grantedPins = 0;
+
+    if (grantCandidates.length > 0) {
+        await db.runTransaction(async (t) => {
+            let delta = 0;
+            const pendingRewards: Array<{ 
+                ref: FirebaseFirestore.DocumentReference; 
+                gRef: FirebaseFirestore.DocumentReference; 
+                candidate: { key: string; productId: string; amount: number } 
+            }> = [];
+
+            for (const c of grantCandidates) {
+                const docId = `${uid}_${c.key}`;
+                const pRef = db.doc(`iap_processed/${docId}`);
+                const globalRef = db.doc(`iap_global/${c.key}`);
+
+                const [snap, gSnap] = await Promise.all([t.get(pRef), t.get(globalRef)]);
+                if (snap.exists || gSnap.exists) continue;
+
+                pendingRewards.push({ ref: pRef, gRef: globalRef, candidate: c });
+                delta += c.amount;
+            }
+
+            for (const entry of pendingRewards) {
+                const data = {
+                    uid,
+                    productId: entry.candidate.productId,
+                    key: entry.candidate.key,
+                    amount: entry.candidate.amount,
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    source: 'revenuecat',
+                };
+                t.set(entry.ref, data);
+                t.set(entry.gRef, data);
+            }
+
+            if (delta > 0) {
+                t.set(
+                    privateRef,
+                    {
+                        pins: admin.firestore.FieldValue.increment(delta),
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                    },
+                    { merge: true }
+                );
+                grantedPins = delta;
+            }
+        });
+    }
+
+    return { grantedPins, subscription };
+}
+
+export const syncRevenueCatPurchases = functions.runWith({ secrets: ['REVENUECAT_SECRET_KEY'] }).https.onCall(async (_data, context) => {
+    if (!context.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'Authentification requise');
+    }
+    const uid = context.auth.uid;
+    try {
+        const res = await syncRevenueCatPurchasesImpl(uid);
+        return { success: true, ...res };
+    } catch (e: any) {
+        const msg = e?.message || 'Sync RevenueCat échoué';
+        logger.error('syncRevenueCatPurchases failed', { uid, msg });
+        throw new functions.https.HttpsError('internal', msg);
+    }
 });
 
 export const buyItemWithPins = functions.https.onCall(async (data, context) => {
@@ -807,11 +1055,40 @@ export const buyItemWithPins = functions.https.onCall(async (data, context) => {
         throw new functions.https.HttpsError('unauthenticated', 'Authentification requise');
     }
     const uid = context.auth.uid;
-    const { itemType, cost } = data;
+    const itemType = typeof data?.itemType === 'string' ? data.itemType : '';
+    const requestId = typeof data?.requestId === 'string' ? data.requestId : '';
+
+    const PIN_COST_BY_ITEM: Record<string, number> = {
+        INVITE: 60,
+        INVITE_BUNDLE_5: 250,
+        INVITE_BUNDLE_15: 650,
+        SUPER_INVITE: 120,
+        SUPER_INVITE_BUNDLE_5: 500,
+        SUPER_INVITE_BUNDLE_15: 1100,
+        BOOST: 300,
+        BOOST_BUNDLE_5: 1200,
+        UNLOCK_LIKE: 30,
+        UNLOCK_LIKE_BUNDLE_10: 250,
+        UNDO: 20,
+        UNDO_BUNDLE_10: 150,
+    };
+
+    const cost = PIN_COST_BY_ITEM[itemType];
+    if (!itemType || typeof cost !== 'number' || !Number.isFinite(cost) || cost <= 0) {
+        throw new functions.https.HttpsError('invalid-argument', 'Article invalide');
+    }
+    if (!requestId || requestId.length < 8 || requestId.length > 80) {
+        throw new functions.https.HttpsError('invalid-argument', 'requestId invalide');
+    }
     
     const userRef = db.doc(`users/${uid}/private/settings`);
+    const processedRef = db.doc(`pin_spends/${uid}_${requestId}`);
     
     await db.runTransaction(async (t) => {
+        const processed = await t.get(processedRef);
+        if (processed.exists) {
+            return;
+        }
         const doc = await t.get(userRef);
         const currentPins = doc.data()?.pins || 0;
         
@@ -846,17 +1123,145 @@ export const buyItemWithPins = functions.https.onCall(async (data, context) => {
              updates.bonusUnlockLikes = admin.firestore.FieldValue.increment(1);
         } else if (itemType === 'UNLOCK_LIKE_BUNDLE_10') {
              updates.bonusUnlockLikes = admin.firestore.FieldValue.increment(10);
+        } else if (itemType === 'UNDO') {
+             updates.bonusUndos = admin.firestore.FieldValue.increment(1);
+        } else if (itemType === 'UNDO_BUNDLE_10') {
+             updates.bonusUndos = admin.firestore.FieldValue.increment(10);
         }
         
         t.set(userRef, updates, { merge: true });
-        
-        // Also update public profile for some counters if needed (e.g. bonusInvites might be mirrored public/private depending on security model)
-        // Here we assume bonus counters are in private/settings primarily or synced.
-        // Let's sync to public user doc just in case the app reads from there for UI
-        t.set(db.doc(`users/${uid}`), updates, { merge: true });
+        t.set(processedRef, {
+            uid,
+            itemType,
+            cost,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
     });
     
     return { success: true };
+});
+
+export const claimEarnPins = functions.https.onCall(async (data, context) => {
+    if (!context.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'Authentification requise');
+    }
+    const uid = context.auth.uid;
+    const type = typeof data?.type === 'string' ? data.type : '';
+    const requestId = typeof data?.requestId === 'string' ? data.requestId : '';
+
+    const REWARD_BY_TYPE: Record<string, { amount: number; cooldownMs: number; lastKey: 'lastProfileSharedAt' | 'lastAppSharedAt' }> = {
+        share_profile: { amount: 10, cooldownMs: 7 * 24 * 60 * 60 * 1000, lastKey: 'lastProfileSharedAt' },
+        share_app: { amount: 5, cooldownMs: 24 * 60 * 60 * 1000, lastKey: 'lastAppSharedAt' },
+    };
+    const def = REWARD_BY_TYPE[type];
+    if (!def) {
+        throw new functions.https.HttpsError('invalid-argument', 'Type invalide');
+    }
+    if (!requestId || requestId.length < 8 || requestId.length > 80) {
+        throw new functions.https.HttpsError('invalid-argument', 'requestId invalide');
+    }
+
+    const privateRef = db.doc(`users/${uid}/private/settings`);
+    const processedRef = db.doc(`earn_processed/${uid}_${type}_${requestId}`);
+    const now = Date.now();
+
+    let grantedPins = 0;
+
+    await db.runTransaction(async (t) => {
+        const processed = await t.get(processedRef);
+        if (processed.exists) {
+            return;
+        }
+        const snap = await t.get(privateRef);
+        const d = (snap.exists ? snap.data() : {}) as any;
+        const rawLast = d?.[def.lastKey] || null;
+        const lastMs =
+            typeof rawLast === 'number' ? rawLast :
+            (rawLast?.toMillis ? rawLast.toMillis() : 0);
+        if (lastMs && now - lastMs < def.cooldownMs) {
+            throw new functions.https.HttpsError('failed-precondition', 'COOLDOWN');
+        }
+        t.set(privateRef, {
+            pins: admin.firestore.FieldValue.increment(def.amount),
+            [def.lastKey]: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        t.set(processedRef, {
+            uid,
+            type,
+            amount: def.amount,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        grantedPins = def.amount;
+    });
+
+    return { success: true, grantedPins };
+});
+
+export const unlockProfilesWithPins = functions.https.onCall(async (data, context) => {
+    if (!context.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'Authentification requise');
+    }
+    const uid = context.auth.uid;
+    const requestId = typeof data?.requestId === 'string' ? data.requestId : '';
+    const idsRaw: any[] = Array.isArray(data?.profileIds) ? (data.profileIds as any[]) : [];
+    const ids: string[] = Array.from(new Set(idsRaw.map((x) => String(x)).filter(Boolean))).slice(0, 50);
+
+    if (!requestId || requestId.length < 8 || requestId.length > 80) {
+        throw new functions.https.HttpsError('invalid-argument', 'requestId invalide');
+    }
+    if (ids.length === 0) {
+        throw new functions.https.HttpsError('invalid-argument', 'Aucun profil');
+    }
+
+    const privateRef = db.doc(`users/${uid}/private/settings`);
+    const processedRef = db.doc(`unlock_processed/${uid}_${requestId}`);
+    const UNIT_COST = 30;
+
+    let charged = 0;
+    let unlockedCount = 0;
+    let unlockedIds: string[] = [];
+
+    await db.runTransaction(async (t) => {
+        const processed = await t.get(processedRef);
+        if (processed.exists) {
+            return;
+        }
+        const snap = await t.get(privateRef);
+        const d = (snap.exists ? snap.data() : {}) as any;
+        const currentPins = Number(d?.pins ?? 0);
+        const existing = Array.isArray(d?.unlockedLikes) ? new Set<string>(d.unlockedLikes.map(String)) : new Set<string>();
+        const toUnlock = ids.filter((id) => !existing.has(id));
+        if (toUnlock.length === 0) {
+            t.set(processedRef, { uid, profileIds: ids, cost: 0, createdAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            return;
+        }
+        const bonus = Math.max(0, Number(d?.bonusUnlockLikes ?? 0) || 0);
+        const useBonus = Math.min(bonus, toUnlock.length);
+        const paidCount = toUnlock.length - useBonus;
+        const cost = paidCount * UNIT_COST;
+        if (!Number.isFinite(currentPins) || currentPins < cost) {
+            throw new functions.https.HttpsError('failed-precondition', 'Pins insuffisants');
+        }
+        const updates: any = {
+            unlockedLikes: admin.firestore.FieldValue.arrayUnion(...toUnlock),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+        if (cost > 0) updates.pins = admin.firestore.FieldValue.increment(-cost);
+        if (useBonus > 0) updates.bonusUnlockLikes = admin.firestore.FieldValue.increment(-useBonus);
+        t.set(privateRef, updates, { merge: true });
+        t.set(processedRef, {
+            uid,
+            profileIds: toUnlock,
+            cost,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        charged = cost;
+        unlockedCount = toUnlock.length;
+        unlockedIds = toUnlock;
+    });
+
+    return { success: true, charged, unlockedCount, unlockedIds };
 });
 
 export const claimDailyReward = functions.runWith({ maxInstances: 5 }).https.onCall(async (_data, context) => {
@@ -868,76 +1273,80 @@ export const claimDailyReward = functions.runWith({ maxInstances: 5 }).https.onC
     const privateRef = db.doc(`users/${uid}/private/settings`);
 
     try {
-        const [userSnap, privateSnap] = await Promise.all([userRef.get(), privateRef.get()]);
-        
-        const pData = privateSnap.exists ? privateSnap.data() : {};
-        const uData = userSnap.exists ? userSnap.data() : {};
-        
-        const lastClaimTime = (pData as any)?.lastDailyRewardClaimedAt || (uData as any)?.lastDailyRewardClaimedAt || 0;
-        let streak = (pData as any)?.dailyStreak || (uData as any)?.dailyStreak || 0;
+        let streak = 0;
+        let reward: any = null;
 
-        const now = Date.now();
-        const lastDate = new Date(lastClaimTime);
-        const today = new Date(now);
-        
-        // Use simpler day diff logic to be robust
-        const oneDay = 24 * 60 * 60 * 1000;
-        
-        // Check if same day
-        if (lastDate.toDateString() === today.toDateString()) {
-             return { success: false, message: 'Déjà réclamé aujourd\'hui', streak };
+        await db.runTransaction(async (t) => {
+            const [userSnap, privateSnap] = await Promise.all([t.get(userRef), t.get(privateRef)]);
+            const pData = privateSnap.exists ? (privateSnap.data() as any) : {};
+            const uData = userSnap.exists ? (userSnap.data() as any) : {};
+
+            const rawLast = pData?.lastDailyRewardClaimedAt || uData?.lastDailyRewardClaimedAt || 0;
+            const lastClaimTime =
+                typeof rawLast === 'number' ? rawLast :
+                (rawLast?.toMillis ? rawLast.toMillis() : 0);
+
+            const rawStreak = pData?.dailyStreak ?? uData?.dailyStreak ?? 0;
+            streak = Number(rawStreak) || 0;
+
+            const now = Date.now();
+            const lastDate = new Date(lastClaimTime);
+            const today = new Date(now);
+            const oneDay = 24 * 60 * 60 * 1000;
+
+            if (lastClaimTime && lastDate.toDateString() === today.toDateString()) {
+                reward = null;
+                return;
+            }
+
+            const yesterday = new Date(now - oneDay);
+            if (lastClaimTime && lastDate.toDateString() === yesterday.toDateString()) {
+                streak = streak + 1;
+            } else {
+                streak = 1;
+            }
+
+            const dayIndex = (streak - 1) % 7;
+            const REWARDS = [
+              { day: 1, type: 'pins', amount: 5, label: '5 Pins' },
+              { day: 2, type: 'invite', amount: 1, label: '1 Invitation' },
+              { day: 3, type: 'pins', amount: 10, label: '10 Pins' },
+              { day: 4, type: 'undo', amount: 1, label: '1 Undo' },
+              { day: 5, type: 'pins', amount: 10, label: '10 Pins' },
+              { day: 6, type: 'unlock_like', amount: 1, label: '1 Révélation' },
+              { day: 7, type: 'boost', amount: 1, label: '1 Boost' },
+            ];
+            reward = REWARDS[dayIndex];
+
+            const updatesPrivate: any = {
+                lastDailyRewardClaimedAt: now,
+                dailyStreak: streak,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            };
+            const updatesPublic: any = {
+                lastDailyRewardClaimedAt: now,
+                dailyStreak: streak,
+            };
+
+            if (reward.type === 'pins') {
+                updatesPrivate.pins = admin.firestore.FieldValue.increment(reward.amount);
+            } else if (reward.type === 'invite') {
+                updatesPrivate.bonusInvites = admin.firestore.FieldValue.increment(reward.amount);
+            } else if (reward.type === 'undo') {
+                updatesPrivate.bonusUndos = admin.firestore.FieldValue.increment(reward.amount);
+            } else if (reward.type === 'unlock_like') {
+                updatesPrivate.bonusUnlockLikes = admin.firestore.FieldValue.increment(reward.amount);
+            } else if (reward.type === 'boost') {
+                updatesPrivate.bonusBoosts = admin.firestore.FieldValue.increment(reward.amount);
+            }
+
+            t.set(privateRef, updatesPrivate, { merge: true });
+            t.set(userRef, updatesPublic, { merge: true });
+        });
+
+        if (!reward) {
+            return { success: false, message: 'Déjà réclamé aujourd\'hui', streak };
         }
-
-        // Check if yesterday was last claim
-        const yesterday = new Date(now - oneDay);
-        if (lastDate.toDateString() === yesterday.toDateString()) {
-            streak++;
-        } else {
-            // Check if diff is less than 2 days (48h) to be lenient with timezones? 
-            // Better stick to strict "yesterday" logic for streaks usually.
-            // If last claim was NOT today AND NOT yesterday, streak resets.
-            streak = 1;
-        }
-
-        const dayIndex = (streak - 1) % 7; // 0-6
-        
-        const REWARDS = [
-          { day: 1, type: 'pins', amount: 5, label: '5 Pins' },
-          { day: 2, type: 'invite', amount: 1, label: '1 Invitation' },
-          { day: 3, type: 'pins', amount: 10, label: '10 Pins' },
-          { day: 4, type: 'undo', amount: 1, label: '1 Undo' },
-          { day: 5, type: 'pins', amount: 10, label: '10 Pins' },
-          { day: 6, type: 'unlock_like', amount: 1, label: '1 Révélation' },
-          { day: 7, type: 'boost', amount: 1, label: '1 Boost' },
-        ];
-        
-        const reward = REWARDS[dayIndex];
-        const updatesPrivate: any = {
-            lastDailyRewardClaimedAt: now,
-            dailyStreak: streak,
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        };
-        const updatesPublic: any = {
-            lastDailyRewardClaimedAt: now,
-            dailyStreak: streak
-        };
-
-        if (reward.type === 'pins') {
-            updatesPrivate.pins = admin.firestore.FieldValue.increment(reward.amount);
-        } else if (reward.type === 'invite') {
-            updatesPrivate.bonusInvites = admin.firestore.FieldValue.increment(reward.amount);
-        } else if (reward.type === 'undo') {
-            updatesPrivate.bonusUndos = admin.firestore.FieldValue.increment(reward.amount);
-        } else if (reward.type === 'unlock_like') {
-            updatesPrivate.bonusUnlockLikes = admin.firestore.FieldValue.increment(reward.amount);
-        } else if (reward.type === 'boost') {
-            updatesPrivate.bonusBoosts = admin.firestore.FieldValue.increment(reward.amount);
-        }
-
-        await Promise.all([
-          privateRef.set(updatesPrivate, { merge: true }),
-          userRef.set(updatesPublic, { merge: true })
-        ]);
 
         return { success: true, streak, reward };
     } catch (e: any) {

@@ -1,0 +1,46 @@
+{
+  "project_info": {
+    "project_number": "591347173909",
+    "project_id": "frendzy-9353a",
+    "storage_bucket": "frendzy-9353a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:591347173909:android:d292533b9ba3267c0b5c1c",
+        "android_client_info": {
+          "package_name": "com.math0.frensy"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "591347173909-on5tg7fdmcbl7grjbahlhtu4f91hdbo1.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAWfDZo_QQEYru9eyLkXbQWhumYji5jSJE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "591347173909-on5tg7fdmcbl7grjbahlhtu4f91hdbo1.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "591347173909-9v9tif71p1j4f594mevtjd7msdivfc22.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.math0.frensy"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

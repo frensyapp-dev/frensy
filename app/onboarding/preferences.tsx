@@ -1,18 +1,17 @@
-import { FontAwesome, Ionicons } from '@expo/vector-icons';
-import { router, Stack } from 'expo-router';
-import { useState, useMemo } from 'react';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View, Dimensions, TextInput, Alert } from 'react-native';
-import { GradientButton } from '../../components/ui/GradientButton';
-import { auth } from '../../firebaseconfig';
-import { ensurePushPermissionAndSave } from '../../lib/notifications';
-import { getUserProfile, savePartialProfile } from '../../lib/profile';
-import { Colors } from '../../constants/Colors';
+import { FontAwesome } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import { router, Stack } from 'expo-router';
+import { useMemo, useState } from 'react';
+import { Alert, Dimensions, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { GradientButton } from '../../components/ui/GradientButton';
 import { ACTIVITIES } from '../../constants/Activities';
+import { Colors } from '../../constants/Colors';
+import { auth } from '../../firebaseconfig';
+import { hapticTap, hapticWarning } from '../../lib/haptics';
+import { getUserProfile, savePartialProfile } from '../../lib/profile';
 
-const { width } = Dimensions.get('window');
-
-type Gen = 'hommes' | 'femmes' | 'autres';
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
+const isSmallDevice = SCREEN_H < 750;
 
 // bornes & défaut pour initialiser la tranche à la création
 const boundsForAge = (age?: number) => {
@@ -32,23 +31,21 @@ const defaultRangeForAge = (age?: number) => {
 
 export default function PreferencesStep() {
   const [interests, setInterests] = useState<string[]>([]);
-  const [genders, setGenders] = useState<Gen[]>([]);
-  const [genderIdentity, setGenderIdentity] = useState<Gen | null>(null);
   const [search, setSearch] = useState('');
   const C = Colors['dark'];
-
-  const selectSingle = <T extends string>(arr: T[], v: T, set: (x: T[]) => void) =>
-    set(arr.includes(v) ? [] : [v]);
 
   const toggleInterest = (id: string) => {
       setInterests(prev => {
           if (prev.includes(id)) {
+              hapticTap();
               return prev.filter(i => i !== id);
           } else {
               if (prev.length >= 10) {
+                  hapticWarning();
                   Alert.alert('Limite atteinte', 'Tu ne peux sélectionner que 10 centres d\'intérêt maximum.');
                   return prev;
               }
+              hapticTap();
               return [...prev, id];
           }
       });
@@ -70,18 +67,15 @@ export default function PreferencesStep() {
     const prof = await getUserProfile(uid);
     const def = defaultRangeForAge(prof?.age);
 
-    const patch: any = { interests, genders };
-    if (genderIdentity) patch.genderIdentity = genderIdentity;
+    const patch: any = { interests };
     if (typeof prof?.desiredMinAge !== 'number') patch.desiredMinAge = def.min;
     if (typeof prof?.desiredMaxAge !== 'number') patch.desiredMaxAge = def.max;
 
     await savePartialProfile(uid, patch);
-    await ensurePushPermissionAndSave();
-
     router.replace('/onboarding/add-photo' as any);
   };
 
-  const disabled = interests.length === 0 || genders.length === 0 || !genderIdentity;
+  const disabled = interests.length === 0;
 
   const ActivityChip = ({ label, icon, selected, onPress }: { label: string, icon: any, selected: boolean, onPress: () => void }) => (
       <TouchableOpacity 
@@ -95,16 +89,6 @@ export default function PreferencesStep() {
           <FontAwesome name={icon} size={16} color={selected ? '#fff' : 'rgba(255,255,255,0.6)'} style={{ marginRight: 8 }} />
           <Text style={[s.chipLabel, selected && { color: '#fff' }]}>{label}</Text>
       </TouchableOpacity>
-  );
-
-  const MiniOption = ({ label, icon, selected, onPress }: { label: string, icon: any, selected: boolean, onPress: () => void }) => (
-    <TouchableOpacity 
-        onPress={onPress} 
-        style={[s.miniOption, selected && s.miniOptionSelected]}
-    >
-        <FontAwesome name={icon} size={20} color={selected ? C.text : 'rgba(255,255,255,0.4)'} style={{ marginBottom: 8 }} />
-        <Text style={[s.miniLabel, selected && { color: C.text }]}>{label}</Text>
-    </TouchableOpacity>
   );
 
   return (
@@ -122,6 +106,7 @@ export default function PreferencesStep() {
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 100 }} showsVerticalScrollIndicator={false}>
                 
                 <Text style={s.sectionTitle}>Centres d&apos;intérêt (max 10)</Text>
+                <Text style={s.sectionHint}>Choisis ce qui t&apos;aide à faire de vraies rencontres. Tu pourras compléter le reste plus tard si tu le souhaites.</Text>
                 
                 <View style={s.searchContainer}>
                     <FontAwesome name="search" size={16} color="rgba(255,255,255,0.4)" style={{ marginRight: 10 }} />
@@ -153,21 +138,6 @@ export default function PreferencesStep() {
                         <Text style={{ color: 'rgba(255,255,255,0.4)', fontStyle: 'italic', marginTop: 10 }}>Aucune activité trouvée</Text>
                     )}
                 </View>
-
-                <Text style={s.sectionTitle}>Ton genre</Text>
-                <View style={s.horizontalGroup}>
-                    <MiniOption label="Homme" icon="mars" selected={genderIdentity === 'hommes'} onPress={() => setGenderIdentity(cur => (cur === 'hommes' ? null : 'hommes'))} />
-                    <MiniOption label="Femme" icon="venus" selected={genderIdentity === 'femmes'} onPress={() => setGenderIdentity(cur => (cur === 'femmes' ? null : 'femmes'))} />
-                    <MiniOption label="Autre" icon="transgender" selected={genderIdentity === 'autres'} onPress={() => setGenderIdentity(cur => (cur === 'autres' ? null : 'autres'))} />
-                </View>
-
-                <Text style={s.sectionTitle}>Tu veux voir qui ?</Text>
-                <View style={s.horizontalGroup}>
-                    <MiniOption label="Hommes" icon="mars" selected={genders.includes('hommes')} onPress={() => selectSingle<Gen>(genders, 'hommes', setGenders)} />
-                    <MiniOption label="Femmes" icon="venus" selected={genders.includes('femmes')} onPress={() => selectSingle<Gen>(genders, 'femmes', setGenders)} />
-                    <MiniOption label="Les deux" icon="venus-mars" selected={genders.includes('autres')} onPress={() => selectSingle<Gen>(genders, 'autres', setGenders)} />
-                </View>
-
             </ScrollView>
 
             <View style={s.footer}>
@@ -180,13 +150,21 @@ export default function PreferencesStep() {
 }
 
 const s = StyleSheet.create({
-  container: { flex: 1, paddingHorizontal: 24, paddingTop: 60 },
-  glow: { position: 'absolute', top: 50, right: -100, width: 300, height: 300, borderRadius: 150, backgroundColor: 'rgba(236, 72, 153, 0.15)' },
-  header: { marginBottom: 24 },
-  stepIndicator: { color: '#EC4899', fontWeight: '700', fontSize: 14, marginBottom: 16, letterSpacing: 1, textTransform: 'uppercase' },
-  title: { fontSize: 36, fontWeight: '900', color: Colors.dark.text, lineHeight: 40 },
+  container: { 
+    flex: 1, 
+    paddingHorizontal: 24, 
+    paddingTop: isSmallDevice ? 40 : 60,
+    width: '100%',
+    maxWidth: 500,
+    alignSelf: 'center',
+  },
+  glow: { position: 'absolute', top: 50, right: -100, width: 300, height: 300, borderRadius: 150, backgroundColor: 'rgba(249, 115, 22, 0.1)' },
+  header: { marginBottom: isSmallDevice ? 16 : 24 },
+  stepIndicator: { color: '#F97316', fontWeight: '700', fontSize: 14, marginBottom: 16, letterSpacing: 1, textTransform: 'uppercase' },
+  title: { fontSize: isSmallDevice ? 32 : 36, fontWeight: '900', color: Colors.dark.text, lineHeight: isSmallDevice ? 36 : 40 },
   
-  sectionTitle: { fontSize: 18, fontWeight: '700', color: Colors.dark.text, marginTop: 32, marginBottom: 16 },
+  sectionTitle: { fontSize: 18, fontWeight: '700', color: Colors.dark.text, marginTop: isSmallDevice ? 20 : 32, marginBottom: 16 },
+  sectionHint: { color: 'rgba(255,255,255,0.6)', marginBottom: 16, lineHeight: 20 },
   
   chipsContainer: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   chip: { 
@@ -200,17 +178,12 @@ const s = StyleSheet.create({
       borderColor: 'rgba(255,255,255,0.1)' 
   },
   chipSelected: { 
-      backgroundColor: Colors.dark.tint, 
-      borderColor: Colors.dark.tint 
+      backgroundColor: '#F97316', 
+      borderColor: '#F97316' 
   },
   chipLabel: { fontSize: 14, fontWeight: '600', color: 'rgba(255,255,255,0.6)' },
 
-  horizontalGroup: { flexDirection: 'row', gap: 12 },
-  miniOption: { flex: 1, backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 16, padding: 16, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)', height: 100 },
-  miniOptionSelected: { backgroundColor: Colors.dark.overlay, borderColor: Colors.dark.tint },
-  miniLabel: { fontSize: 14, fontWeight: '600', color: 'rgba(255,255,255,0.6)' },
-
-  footer: { position: 'absolute', bottom: 40, left: 24, right: 24 },
+  footer: { position: 'absolute', bottom: isSmallDevice ? 20 : 40, left: 24, right: 24 },
 
   searchContainer: {
       flexDirection: 'row',
@@ -230,3 +203,4 @@ const s = StyleSheet.create({
       fontWeight: '600',
   },
 });
+

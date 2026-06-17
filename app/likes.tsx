@@ -1,11 +1,11 @@
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { BlurView } from 'expo-blur';
 import { router } from 'expo-router';
-import { arrayUnion, collection, doc, getDoc, getDocs, getFirestore, increment, query, where } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, getFirestore, query, where } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
     ActivityIndicator,
-    Alert,
     FlatList,
     RefreshControl,
     Image as RNImage,
@@ -16,11 +16,13 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Avatar from '../components/ui/Avatar';
+import { useDialog } from '../components/ui/Dialog';
 import { useToast } from '../components/ui/Toast';
 import { Colors } from '../constants/Colors';
-import { auth } from '../firebaseconfig';
-import { FEATURE_COSTS, getLimits, performActionUpdates } from '../lib/monetization';
-import { applyUserUpdates, getUserProfile, UserProfile } from '../lib/profile';
+import { auth, functions } from '../firebaseconfig';
+import { useSubscription } from '../hooks/useSubscription';
+import { FEATURE_COSTS, performActionUpdates } from '../lib/monetization';
+import { getUserProfile, UserProfile } from '../lib/profile';
 
 const PINS_IMG = require('../assets/images/pins2.png');
 
@@ -43,8 +45,10 @@ export default function LikesScreen() {
   const [profiles, setProfiles] = useState<LikeProfile[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [myProfile, setMyProfile] = useState<UserProfile | null>(null);
+  const mySubscription = useSubscription(myProfile?.subscription);
   const [showRevealOptions, setShowRevealOptions] = useState(false);
   const { showToast } = useToast();
+  const { alert, confirm } = useDialog();
   const insets = useSafeAreaInsets();
   const db = getFirestore();
 
@@ -175,16 +179,16 @@ export default function LikesScreen() {
                 onPress: async () => {
                     try {
                         const ids = toReveal.map(p => p.uid!);
-
-                        await applyUserUpdates(myProfile.uid!, {
-                            pins: increment(-cost) as any,
-                            unlockedLikes: arrayUnion(...ids) as any
-                        });
+                        const requestId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+                        const unlockFn = httpsCallable(functions, 'unlockProfilesWithPins');
+                        const r: any = await unlockFn({ profileIds: ids, requestId });
+                        const charged = typeof r?.data?.charged === 'number' ? r.data.charged : cost;
+                        const unlockedIds = Array.isArray(r?.data?.unlockedIds) ? r.data.unlockedIds : ids;
 
                         setMyProfile(prev => prev ? ({
                             ...prev,
-                            pins: (prev.pins || 0) - cost,
-                            unlockedLikes: [...(prev.unlockedLikes || []), ...ids]
+                            pins: (prev.pins || 0) - charged,
+                            unlockedLikes: Array.from(new Set([...(prev.unlockedLikes || []), ...unlockedIds]))
                         }) : null);
                         
                         showToast('Succès', `${toReveal.length} profils révélés !`, 'success');
@@ -204,9 +208,9 @@ export default function LikesScreen() {
     const check = performActionUpdates(myProfile, 'UNLOCK_LIKE');
     if (!check.allowed) {
         if (check.reason === 'insufficient_coins') {
-             Alert.alert(
+             alert(
                 'Pins insuffisants', 
-                'Vous n&apos;avez pas assez de pins pour débloquer ce profil.',
+                'Vous n\'avez pas assez de pins pour débloquer ce profil.',
                 [
                     { text: 'Annuler', style: 'cancel' },
                     { text: 'Acheter des pins', onPress: () => router.push({ pathname: '/store', params: { tab: 'coins' } } as any) }
@@ -219,7 +223,7 @@ export default function LikesScreen() {
     }
 
     // Show confirmation
-    Alert.alert(
+    alert(
         'Débloquer le profil ?',
         `Voulez-vous utiliser ${check.cost} pins pour voir ce profil ?`,
         [
@@ -228,21 +232,20 @@ export default function LikesScreen() {
                 text: 'Débloquer', 
                 onPress: async () => {
                     try {
-                        // Update Firestore
-                        const updates = check.updates || {};
-                        
-                        await applyUserUpdates(myProfile.uid!, {
-                            ...updates,
-                            unlockedLikes: arrayUnion(profileId) as any
-                        });
+                        const requestId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+                        const unlockFn = httpsCallable(functions, 'unlockProfilesWithPins');
+                        const r: any = await unlockFn({ profileIds: [profileId], requestId });
+                        const charged = typeof r?.data?.charged === 'number' ? r.data.charged : (check.cost || 0);
+                        const unlockedIds = Array.isArray(r?.data?.unlockedIds) ? r.data.unlockedIds : [profileId];
 
                         // Update local state immediately
                         setMyProfile(prev => prev ? ({
                             ...prev,
-                            ...updates,
-                            unlockedLikes: [...(prev.unlockedLikes || []), profileId]
+                            pins: (prev.pins || 0) - charged,
+                            unlockedLikes: Array.from(new Set([...(prev.unlockedLikes || []), ...unlockedIds]))
                         }) : null);
 
+                        showToast('Succès', 'Profil débloqué !', 'success');
                     } catch (e) {
                         console.error('Error unlocking profile:', e);
                         showToast('Erreur', 'Impossible de débloquer le profil.', 'error');
@@ -253,8 +256,7 @@ export default function LikesScreen() {
     );
   };
 
-  const limits = getLimits(myProfile?.subscription || 'FREE');
-  const isPro = myProfile?.subscription === 'PRO';
+  const isPro = mySubscription === 'PRO';
   // Si FREE: on ne montre rien (teaser)
   // Si PLUS: on montre flouté (teaser light)
   // Si PRO: on montre tout
@@ -301,7 +303,7 @@ export default function LikesScreen() {
         <TouchableOpacity 
             style={s.userRow} 
             onPress={() => {
-                Alert.alert(
+                alert(
                     'Profil flouté', 
                     'Passez PRO pour tout voir, ou débloquez ce profil avec des pins.', 
                     [
@@ -325,7 +327,7 @@ export default function LikesScreen() {
             <View style={{ flex: 1, marginLeft: 12 }}>
                 <View style={{ backgroundColor: C.panel, height: 20, width: 100, borderRadius: 4, marginBottom: 6 }} />
                 <Text style={s.userSubtitle} numberOfLines={1}>
-                    Quelqu&apos;un vous a liké
+                    Quelqu&apos;un a montre de l&apos;interet
                 </Text>
             </View>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
@@ -346,7 +348,7 @@ export default function LikesScreen() {
         <TouchableOpacity onPress={() => router.back()} style={s.backBtn}>
           <FontAwesome name="chevron-left" size={20} color={C.text} />
         </TouchableOpacity>
-        <Text style={s.headerTitle}>Mes Likes</Text>
+        <Text style={s.headerTitle}>Interets recus</Text>
         <TouchableOpacity onPress={() => router.push({ pathname: '/store', params: { tab: 'coins' } } as any)}>
             <Text style={{ color: accent, fontWeight: '700' }}>Store</Text>
         </TouchableOpacity>
@@ -359,16 +361,16 @@ export default function LikesScreen() {
       ) : (
         <>
             {/* Cas FREE: Teaser complet si on veut suivre strict "aucun compteur", mais souvent on veut montrer qu'il y a des likes */}
-            {myProfile?.subscription === 'FREE' && profiles.length > 0 && (!myProfile.unlockedLikes || myProfile.unlockedLikes.length === 0) ? (
+            {mySubscription === 'FREE' && profiles.length > 0 && (!myProfile?.unlockedLikes || myProfile.unlockedLikes.length === 0) ? (
                 <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 }}>
                     <View style={{ width: 80, height: 80, borderRadius: 40, backgroundColor: C.panel, alignItems: 'center', justifyContent: 'center', marginBottom: 24 }}>
                         <FontAwesome name="heart" size={32} color={accent} />
                     </View>
                     <Text style={{ color: C.text, fontSize: 24, fontWeight: '900', textAlign: 'center', marginBottom: 12 }}>
-                        Des personnes vous ont liké !
+                        Des personnes veulent vous decouvrir !
                     </Text>
                     <Text style={{ color: C.muted, fontSize: 16, textAlign: 'center', marginBottom: 32 }}>
-                        Passez à Frensy PLUS ou PRO pour découvrir qui s&apos;intéresse à vous.
+                        Passez a Frensy PLUS ou PRO pour voir les profils interesses, ou revelez-les avec des pins.
                     </Text>
                     <TouchableOpacity 
                         onPress={() => router.push({ pathname: '/store', params: { tab: 'coins' } } as any)}
@@ -426,7 +428,7 @@ export default function LikesScreen() {
                 profiles.length === 0 ? (
                     <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 }}>
                         <FontAwesome name="heart-o" size={48} color={C.panel} />
-                        <Text style={{ color: C.subtleText, marginTop: 16, fontSize: 16 }}>Personne ne vous a liké pour le moment.</Text>
+                        <Text style={{ color: C.subtleText, marginTop: 16, fontSize: 16 }}>Aucun profil interesse pour le moment.</Text>
                     </View>
                 ) : (
                     <FlatList

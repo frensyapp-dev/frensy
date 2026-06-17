@@ -25,11 +25,12 @@ import { dismissChatNotification } from '../../lib/notifications';
 import { openUserOnMap } from '../../lib/openUserOnMap';
 import { applyUserUpdates, getUserProfile, userPrivateRef, UserProfile } from '../../lib/profile';
 import { reportMessage, reportUser } from '../../lib/report';
-import { pickAndUploadChatImage } from '../../lib/uploadImages';
+import { pickMessageMediaAsset, uploadPickedChatImage } from '../../lib/uploadImages';
 
 import { checkPhotoSafety, REJECTION_MSG, validateMessage } from '../../lib/moderation';
 // import { updateDoc } from 'firebase/firestore';
 import { useTutorial } from '@/components/TutorialProvider';
+import { Image as ExpoImage } from 'expo-image';
 
 // type Scheme = 'light' | 'dark';
 
@@ -87,6 +88,9 @@ export default function ChatDetail() {
   const [draftPhoto, setDraftPhoto] = useState<string | null>(null);
   const [draftMediaType, setDraftMediaType] = useState<'image' | 'video'>('image');
   const [draftDims, setDraftDims] = useState<{ width: number; height: number } | undefined>(undefined);
+  const [draftLocalMediaUri, setDraftLocalMediaUri] = useState<string | null>(null);
+  const [draftMediaStatus, setDraftMediaStatus] = useState<'idle' | 'uploading' | 'analyzing' | 'error'>('idle');
+  const draftMediaTokenRef = useRef(0);
   const [fullScreenImage, setFullScreenImage] = useState<string | null>(null);
   const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
   
@@ -391,13 +395,18 @@ export default function ChatDetail() {
       }
       
       // Optimistic update for fluidity
-      setDraft('');
       const photoToSend = draftPhoto;
       const mediaTypeToSend = draftMediaType;
       const dims = draftDims;
-      setDraftPhoto(null);
-      setDraftMediaType('image');
-      setDraftDims(undefined);
+      setDraft('');
+      if (photoToSend) {
+        setDraftPhoto(null);
+        setDraftMediaType('image');
+        setDraftDims(undefined);
+        setDraftLocalMediaUri(null);
+        setDraftMediaStatus('idle');
+        draftMediaTokenRef.current += 1;
+      }
       const textToSend = text;
       
       const replyData = replyingTo ? {
@@ -450,20 +459,59 @@ export default function ChatDetail() {
         return;
       }
 
-      const isPro = profile.subscription === 'PRO';
-      const res = await pickAndUploadChatImage(chatId, isPro);
-      if (res) {
-        // Moderation
-        const safety = await checkPhotoSafety(res.url);
-        if (safety === 'rejected') {
-          showToast('Photo refusée', REJECTION_MSG, 'error');
-          return;
-        }
+      const asset = await pickMessageMediaAsset(false);
+      if (!asset) return;
 
-        setDraftPhoto(res.url);
-        setDraftMediaType(res.type);
-        setDraftDims({ width: res.width, height: res.height });
+      if (asset.type === 'video') return;
+
+      const token = draftMediaTokenRef.current + 1;
+      draftMediaTokenRef.current = token;
+      setDraftLocalMediaUri(asset.uri);
+      setDraftMediaStatus('uploading');
+      setDraftMediaType('image');
+      if (typeof asset.width === 'number' && typeof asset.height === 'number') {
+        setDraftDims({ width: asset.width, height: asset.height });
       }
+
+      void (async () => {
+        try {
+          const res = await uploadPickedChatImage(chatId, asset);
+          if (!res) return;
+          if (draftMediaTokenRef.current !== token) {
+            try {
+              const { getStorage, ref, deleteObject } = await import('firebase/storage');
+              await deleteObject(ref(getStorage(), res.path)).catch(() => {});
+            } catch {}
+            return;
+          }
+
+          if (res.type === 'image') {
+            setDraftMediaStatus('analyzing');
+            const safety = await checkPhotoSafety(res.url);
+            if (draftMediaTokenRef.current !== token) return;
+            if (safety === 'rejected') {
+              try {
+                const { getStorage, ref, deleteObject } = await import('firebase/storage');
+                await deleteObject(ref(getStorage(), res.path)).catch(() => {});
+              } catch {}
+              setDraftLocalMediaUri(null);
+              setDraftMediaStatus('error');
+              showToast('Photo refusée', REJECTION_MSG, 'error');
+              return;
+            }
+          }
+
+          setDraftPhoto(res.url);
+          setDraftLocalMediaUri(null);
+          setDraftMediaStatus('idle');
+          setDraftDims({ width: res.width, height: res.height });
+          setDraftMediaType(res.type);
+        } catch (e: any) {
+          if (draftMediaTokenRef.current !== token) return;
+          setDraftMediaStatus('error');
+          showToast('Erreur', e?.message ?? "Impossible d'envoyer la photo", 'error');
+        }
+      })();
     } catch (e: any) {
       showToast('Erreur', e.message, 'error');
     }
@@ -601,6 +649,7 @@ export default function ChatDetail() {
 
   const acceptInvite = async () => {
     try {
+      setSending(true);
       await respondToChatRequest(chatId, 'accepted');
       try { await (await import('../../lib/chat/storage')).unremoveConversation(chatId); } catch {}
       setPendingInvite(null);
@@ -611,6 +660,8 @@ export default function ChatDetail() {
       
     } catch (e: any) {
       Alert.alert('Erreur', e?.message || "Échec de l’acceptation");
+    } finally {
+      setSending(false);
     }
   };
 
@@ -679,14 +730,14 @@ export default function ChatDetail() {
                     )}
                 </View>
                 {pendingInvite.imageUrl && (
-                  <Image source={{ uri: pendingInvite.imageUrl }} style={{ width: 100, height: 100, borderRadius: 12, marginTop: 6 }} />
+                  <ExpoImage source={{ uri: pendingInvite.imageUrl }} style={{ width: 100, height: 100, borderRadius: 12, marginTop: 6 }} contentFit="cover" cachePolicy="memory-disk" transition={120} />
                 )}
                 {!!pendingInvite.messageText && (<Text style={{ color: pendingInvite.isSuper ? '#FFD700' : '#aaa', marginTop: 6 }}>{pendingInvite.messageText}</Text>)}
                 <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
-                  <TouchableOpacity onPress={acceptInvite} style={{ paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, backgroundColor: pendingInvite.isSuper ? '#FFD700' : ACCENT }}>
-                    <Text style={{ color: pendingInvite.isSuper ? '#000' : '#fff', fontWeight: '800' }}>Accepter</Text>
+                  <TouchableOpacity onPress={acceptInvite} disabled={sending} style={{ paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, backgroundColor: pendingInvite.isSuper ? '#FFD700' : ACCENT, opacity: sending ? 0.7 : 1 }}>
+                    {sending ? <ActivityIndicator size="small" color={pendingInvite.isSuper ? "#000" : "#fff"} /> : <Text style={{ color: pendingInvite.isSuper ? '#000' : '#fff', fontWeight: '800' }}>Accepter</Text>}
                   </TouchableOpacity>
-                  <TouchableOpacity onPress={rejectInvite} style={{ paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, backgroundColor: '#333', borderWidth: 1, borderColor: C.border }}>
+                  <TouchableOpacity onPress={rejectInvite} disabled={sending} style={{ paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, backgroundColor: '#333', borderWidth: 1, borderColor: C.border, opacity: sending ? 0.7 : 1 }}>
                     <Text style={{ color: '#fff', fontWeight: '800' }}>Refuser</Text>
                   </TouchableOpacity>
                 </View>
@@ -823,10 +874,12 @@ export default function ChatDetail() {
                                 </View>
                              )}
                              <TouchableOpacity onPress={() => setFullScreenImage(item.imageUrl!)}>
-                                <Image 
+                                <ExpoImage
                                   source={{ uri: item.imageUrl! }} 
                                   style={{ width: 200, height: 200 * aspectRatio, borderRadius: 16, maxWidth: 240, maxHeight: 300 }} 
-                                  resizeMode="cover"
+                                  contentFit="cover"
+                                  cachePolicy="memory-disk"
+                                  transition={120}
                                 />
                              </TouchableOpacity>
                              {!!item.text && (
@@ -933,10 +986,12 @@ export default function ChatDetail() {
                       ) : isImg ? (
                         <View>
                           <TouchableOpacity onPress={() => setFullScreenImage(item.imageUrl!)}>
-                          <Image 
+                          <ExpoImage
                             source={{ uri: item.imageUrl! }} 
                             style={{ width: 200, height: 200 * aspectRatio, borderRadius: 12, maxWidth: 240, maxHeight: 300 }} 
-                            resizeMode="cover"
+                            contentFit="cover"
+                            cachePolicy="memory-disk"
+                            transition={120}
                           />
                           </TouchableOpacity>
                           {!!item.text && (
@@ -986,18 +1041,21 @@ export default function ChatDetail() {
             </View>
           )}
 
-          {draftPhoto && (
+          {(draftPhoto || draftLocalMediaUri) && (
             <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#1A1A1A', paddingHorizontal: 16, paddingVertical: 8, borderTopWidth: 1, borderTopColor: '#333' }}>
-              <Image source={{ uri: draftPhoto }} style={{ width: 48, height: 48, borderRadius: 8, marginRight: 12, backgroundColor: '#333' }} resizeMode="cover" />
+              <ExpoImage source={{ uri: draftPhoto || draftLocalMediaUri! }} style={{ width: 48, height: 48, borderRadius: 8, marginRight: 12, backgroundColor: '#333' }} contentFit="cover" cachePolicy="memory-disk" transition={100} />
               <View style={{ flex: 1 }}>
                 <Text style={{ color: ACCENT, fontSize: 12, fontWeight: '700', marginBottom: 2 }}>
-                  Photo jointe
+                  {draftMediaType === 'video' ? 'Vidéo jointe' : 'Photo jointe'}
                 </Text>
                 <Text style={{ color: '#aaa', fontSize: 12 }}>
-                  Appuyez sur envoyer pour partager
+                  {draftMediaStatus === 'uploading' ? 'Envoi en cours…' : (draftMediaStatus === 'analyzing' ? 'Analyse en cours…' : 'Appuyez sur envoyer pour partager')}
                 </Text>
               </View>
-              <TouchableOpacity onPress={() => setDraftPhoto(null)} style={{ padding: 4 }}>
+              {draftMediaStatus === 'uploading' || draftMediaStatus === 'analyzing' ? (
+                <ActivityIndicator size="small" color="#aaa" />
+              ) : null}
+              <TouchableOpacity onPress={() => { setDraftPhoto(null); setDraftLocalMediaUri(null); setDraftMediaStatus('idle'); draftMediaTokenRef.current += 1; }} style={{ padding: 4 }}>
                  <FontAwesome name="times" size={16} color="#aaa" />
               </TouchableOpacity>
             </View>
@@ -1017,8 +1075,8 @@ export default function ChatDetail() {
              </Animated.View>
 
              <View style={{ flex: 1, minHeight: 48, borderRadius: 24, backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20 }}>
-               <View style={{ alignItems: 'center', marginRight: 10 }}>
-                 <TouchableOpacity onPress={onSendImage}>
+             <View style={{ alignItems: 'center', marginRight: 10 }}>
+                 <TouchableOpacity onPress={onSendImage} disabled={sending || draftMediaStatus === 'uploading' || draftMediaStatus === 'analyzing'}>
                    <FontAwesome name="camera" size={20} color="#fff" />
                  </TouchableOpacity>
                  {myProfile?.subscription !== 'PRO' && myProfile?.subscription !== 'PLUS' && (
@@ -1036,12 +1094,12 @@ export default function ChatDetail() {
                />
              </View>
   
-             <TouchableOpacity 
-               onPress={((draft.trim().length > 0 || !!draftPhoto) && !pendingInvite && !sentInvite && !sending) ? send : undefined}
+            <TouchableOpacity 
+              onPress={((draft.trim().length > 0 || !!draftPhoto) && !pendingInvite && !sentInvite && !sending) ? send : undefined}
                disabled={!!pendingInvite || !!sentInvite || sending}
                style={{ 
                  width: 40, height: 40, borderRadius: 20, 
-                 backgroundColor: ((draft.trim().length > 0 || !!draftPhoto) && !pendingInvite && !sentInvite && !sending) ? ACCENT : '#333', 
+                backgroundColor: ((draft.trim().length > 0 || !!draftPhoto) && !pendingInvite && !sentInvite && !sending) ? ACCENT : '#333', 
                  alignItems: 'center', justifyContent: 'center',
                  opacity: sending ? 0.7 : 1
                }}
@@ -1072,7 +1130,7 @@ export default function ChatDetail() {
             <FontAwesome name="times" size={30} color="#fff" />
           </TouchableOpacity>
           {fullScreenImage && (
-            <Image source={{ uri: fullScreenImage }} style={{ width: '100%', height: '100%' }} resizeMode="contain" />
+            <ExpoImage source={{ uri: fullScreenImage }} style={{ width: '100%', height: '100%' }} contentFit="contain" cachePolicy="memory-disk" transition={120} />
           )}
         </View>
       </Modal>

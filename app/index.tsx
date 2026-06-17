@@ -1,19 +1,18 @@
 // app/index.tsx
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import dayjs from 'dayjs';
+import * as AppleAuthentication from 'expo-apple-authentication';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
-import { createUserWithEmailAndPassword, onAuthStateChanged, signInWithEmailAndPassword, User } from 'firebase/auth';
-import { useEffect, useMemo, useState } from 'react';
+import { onAuthStateChanged, User } from 'firebase/auth';
+import { useEffect, useState } from 'react';
 import {
     ActivityIndicator,
+    Alert,
     Dimensions,
     Image,
-    KeyboardAvoidingView,
+    Linking,
     Platform,
     StyleSheet,
     Text,
-    TextInput,
     TouchableOpacity,
     View
 } from 'react-native';
@@ -26,8 +25,11 @@ import Animated, {
     withTiming
 } from 'react-native-reanimated';
 import SplashScreen from '../components/SplashScreen';
+import GlassCard from '../components/ui/GlassCard';
 import { Colors } from '../constants/Colors';
 import { auth } from '../firebaseconfig';
+import { signInWithApple, signInWithGoogle } from '../lib/auth';
+import { nextRouteForProfile } from '../lib/authGate';
 import { getUserProfile } from '../lib/profile';
 
 import Logo from '../assets/images/frensylogo.png';
@@ -38,18 +40,27 @@ export default function Index() {
   const [userSession, setUserSession] = useState<User | null>(null);
   const [targetRoute, setTargetRoute] = useState<string | null>(null);
 
-  const [mode, setMode] = useState<'login' | 'signup'>('login');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [confirm, setConfirm] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showPwd, setShowPwd] = useState(false);
+  const [isAppleAuthAvailable, setIsAppleAuthAvailable] = useState(false);
 
   // Pulse Animation for Logo (Reanimated)
   const pulseScale = useSharedValue(1);
   
   useEffect(() => {
+    (async () => {
+      if (Platform.OS !== 'ios') {
+        setIsAppleAuthAvailable(false);
+        return;
+      }
+      try {
+        const avail = await AppleAuthentication.isAvailableAsync();
+        setIsAppleAuthAvailable(avail);
+      } catch {
+        setIsAppleAuthAvailable(false);
+      }
+    })();
+
     pulseScale.value = withRepeat(
       withSequence(
         withTiming(1.05, { duration: 1500, easing: Easing.inOut(Easing.ease) }),
@@ -71,12 +82,10 @@ export default function Index() {
       if (u) {
         try {
             const prof = await getUserProfile(u.uid);
-            if (!prof?.completed) setTargetRoute('/onboarding/welcome');
-            else setTargetRoute('/(tabs)/home');
+            setTargetRoute(nextRouteForProfile(prof));
         } catch (e) {
             console.error("Profile fetch error", e);
-            // Fallback: try home
-            setTargetRoute('/(tabs)/home'); 
+            setTargetRoute('/onboarding/welcome');
         }
       } else {
         setTargetRoute(null);
@@ -90,49 +99,7 @@ export default function Index() {
   useEffect(() => {
     if (isSplashFinished && isAuthLoaded) {
         if (userSession && targetRoute) {
-            // Ne vérifier le Daily Reward QUE si l'onboarding est terminé (targetRoute pointe vers home)
-            if (targetRoute.includes('(tabs)')) {
-                (async () => {
-                   try {
-                       const { doc, getDoc } = await import('firebase/firestore');
-                       const { db } = await import('../firebaseconfig');
-                       
-                       const userDoc = await getDoc(doc(db, 'users', userSession.uid));
-                       if (userDoc.exists()) {
-                           const d = userDoc.data();
-                           const rawLastClaim = (d as any).lastDailyRewardClaimedAt;
-                           let lastClaim = null as dayjs.Dayjs | null;
-                           if (rawLastClaim) {
-                               if (typeof rawLastClaim === 'number') {
-                                   lastClaim = dayjs(rawLastClaim);
-                               } else if (typeof (rawLastClaim as any).toMillis === 'function') {
-                                   lastClaim = dayjs(rawLastClaim.toMillis());
-                               } else if (rawLastClaim instanceof Date) {
-                                   lastClaim = dayjs(rawLastClaim.getTime());
-                               }
-                           }
-                           const now = dayjs();
-                           
-                           if (!lastClaim || !now.isSame(lastClaim, 'day')) {
-                               const key = `dailyReward:opened:${now.format('YYYY-MM-DD')}`;
-                               const wasOpened = await AsyncStorage.getItem(key);
-                               if (!wasOpened) {
-                                  try { await AsyncStorage.setItem(key, '1'); } catch {}
-                                  // Naviguer d'abord vers home, puis ouvrir le store après un délai suffisant
-                                  router.replace('/(tabs)/home');
-                                  setTimeout(() => { router.push('/store'); }, 1500);
-                                  return;
-                               }
-                           }
-                       }
-                   } catch(e) { console.error(e); }
-                   
-                   router.replace(targetRoute as any);
-                })();
-            } else {
-                // Si on est en onboarding, on navigue juste vers la route cible sans daily reward
-                router.replace(targetRoute as any);
-            }
+            router.replace(targetRoute as any);
         }
     }
   }, [isSplashFinished, isAuthLoaded, userSession, targetRoute]);
@@ -141,52 +108,52 @@ export default function Index() {
     setSplashFinished(true);
   };
 
-  const canSubmit = useMemo(() => {
-    const validEmail = /.+@.+\..+/.test(email.trim());
-    const validPwd = password.length >= 6;
-    const match = mode === 'login' || password === confirm;
-    return validEmail && validPwd && match && !loading;
-  }, [email, password, confirm, mode, loading]);
-
-  const postAuthRoute = async () => {
-    const u = auth.currentUser;
-    if (!u) return;
-    try {
-        const prof = await getUserProfile(u.uid);
-        if (!prof?.completed) router.replace('/onboarding/welcome');
-        else router.replace('/(tabs)/home');
-    } catch (e) {
-        console.error(e);
-        router.replace('/(tabs)/home');
-    }
-  };
-
-  const handleSubmit = async () => {
+  const handleGoogleSignIn = async () => {
+    if (loading) return;
     try {
       setLoading(true);
       setError(null);
-      if (mode === 'login') {
-        await signInWithEmailAndPassword(auth, email.trim(), password);
-      } else {
-        await createUserWithEmailAndPassword(auth, email.trim(), password);
-      }
-      await postAuthRoute();
+      await signInWithGoogle();
+      // Auth state listener handles navigation
     } catch (e: any) {
-      const code = e?.code ?? '';
-      if (mode === 'signup' && code === 'auth/email-already-in-use') {
-        setMode('login');
-        setError('Cette adresse e-mail est déjà utilisée. Veuillez vous connecter.');
-      } else if (code === 'auth/invalid-credential' || code === 'auth/wrong-password') {
-        setError('Identifiants invalides. Vérifie ton e-mail et ton mot de passe.');
-      } else if (code === 'auth/user-not-found') {
-        setError("Aucun compte n'est associé à cet e-mail.");
-      } else if (code === 'auth/invalid-email') {
-        setError('Adresse e-mail invalide.');
-      } else if (code === 'auth/weak-password') {
-        setError('Mot de passe trop court (min. 6 caractères).');
-      } else {
-        setError(e?.message ?? 'Erreur inconnue');
+      console.error(e);
+      if (e?.code === 'auth/link-required' && typeof e?.message === 'string') {
+        setError(e.message);
+        return;
       }
+      const msg = typeof e?.message === 'string' ? e.message : '';
+      const msgLower = msg.toLowerCase();
+      if (msg.includes('Expo Go')) {
+        Alert.alert(
+          "Mode Développement",
+          "Le Google Sign-In ne fonctionne pas dans Expo Go. Utilisez un Development Build pour tester la connexion réelle."
+        );
+      } else if (Platform.OS === 'web' && msgLower.includes('web')) {
+        setError("La connexion Google n’est pas disponible sur le web.");
+      } else if (msgLower.includes('webclientid') || msgLower.includes('token')) {
+        setError("Connexion Google indisponible. Vérifiez la configuration et réessayez.");
+      } else {
+        setError("Erreur de connexion Google. Vérifiez votre connexion.");
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAppleSignIn = async () => {
+    if (loading) return;
+    try {
+      setLoading(true);
+      setError(null);
+      await signInWithApple();
+      // Auth state listener handles navigation
+    } catch (e: any) {
+      console.error(e);
+      if (e?.code === 'auth/link-required' && typeof e?.message === 'string') {
+        setError(e.message);
+        return;
+      }
+      setError("Erreur de connexion Apple.");
     } finally {
       setLoading(false);
     }
@@ -216,16 +183,15 @@ export default function Index() {
 
   return (
     <LinearGradient
-      colors={['#000000', '#111827']}
+      colors={[Colors.dark.background, Colors.dark.card, Colors.dark.background]}
       style={{ flex: 1 }}
     >
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      <View
         style={styles.container}
       >
         {/* Background Glow */}
         <LinearGradient
-          colors={['rgba(249, 115, 22, 0.15)', 'transparent']}
+          colors={[Colors.dark.overlay, 'transparent']}
           style={{
             position: 'absolute',
             top: -100,
@@ -240,88 +206,65 @@ export default function Index() {
           <Image source={Logo} style={styles.logo} />
         </Animated.View>
 
-        <View style={styles.glassCard}>
+        <GlassCard style={styles.glassCard} intensity={20}>
           <Text style={styles.title}>
-            {mode === 'login' ? 'Connexion' : 'Créer un compte'}
+            Connexion
           </Text>
           <Text style={styles.subtitle}>
-            {mode === 'login' ? 'Ravi de te revoir.' : 'Rejoins-nous en quelques secondes.'}
+            Connexion / inscription en 1 clic.
           </Text>
 
-          <View style={styles.inputGroup}>
-            <View style={styles.inputRow}>
-              <TextInput
-                style={styles.input}
-                placeholder="Email"
-                placeholderTextColor="rgba(255,255,255,0.4)"
-                value={email}
-                onChangeText={setEmail}
-                autoCapitalize="none"
-                autoCorrect={false}
-                keyboardType="email-address"
-                textContentType="emailAddress"
-                returnKeyType="next"
-              />
-            </View>
+          <View style={styles.buttonContainer}>
+            {isAppleAuthAvailable ? (
+                <View style={styles.appleButtonContainer}>
+                  <AppleAuthentication.AppleAuthenticationButton
+                    buttonType={AppleAuthentication.AppleAuthenticationButtonType.SIGN_IN}
+                    buttonStyle={AppleAuthentication.AppleAuthenticationButtonStyle.WHITE}
+                    cornerRadius={26}
+                    style={[styles.appleButton, loading && styles.disabledButton]}
+                    onPress={() => { void handleAppleSignIn(); }}
+                  />
+                </View>
+              ) : null}
 
-            <View style={styles.inputRow}>
-              <TextInput
-                style={styles.input}
-                placeholder="Mot de passe (min. 6)"
-                placeholderTextColor="rgba(255,255,255,0.4)"
-                value={password}
-                onChangeText={setPassword}
-                secureTextEntry={!showPwd}
-                textContentType="password"
-                returnKeyType="done"
-              />
-              <TouchableOpacity onPress={() => setShowPwd((s) => !s)}>
-                <Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 12 }}>{showPwd ? 'MASQUER' : 'AFFICHER'}</Text>
-              </TouchableOpacity>
-            </View>
-
-            {mode === 'signup' && (
-              <View style={styles.inputRow}>
-                <TextInput
-                  style={styles.input}
-                  placeholder="Confirme le mot de passe"
-                  placeholderTextColor="rgba(255,255,255,0.4)"
-                  value={confirm}
-                  onChangeText={setConfirm}
-                  secureTextEntry={!showPwd}
-                  textContentType="password"
-                />
-              </View>
-            )}
-          </View>
-
-          {!!error && <Text style={styles.error}>{error}</Text>}
-
-          <TouchableOpacity
-            disabled={!canSubmit}
-            onPress={handleSubmit}
-            style={[styles.primaryBtn, { opacity: canSubmit ? 1 : 0.6 }]}
-          >
-            {loading ? <ActivityIndicator color="#fff" /> : (
-              <Text style={styles.primaryTxt}>{mode === 'login' ? 'Se connecter' : "S'inscrire"}</Text>
-            )}
-          </TouchableOpacity>
-
-          <View style={styles.switchRow}>
-            <Text style={{ color: 'rgba(255,255,255,0.6)' }}>{mode === 'login' ? 'Pas de compte ?' : 'Déjà inscrit ?'}</Text>
             <TouchableOpacity
-              onPress={() => {
-                setMode((m) => (m === 'login' ? 'signup' : 'login'));
-                setError(null);
-              }}
+              style={[styles.customGoogleButton, loading && styles.disabledButton]}
+              onPress={() => { void handleGoogleSignIn(); }}
+              activeOpacity={0.8}
+              disabled={loading}
             >
-              <Text style={styles.link}>
-                {mode === 'login' ? 'Créer un compte' : 'Se connecter'}
-              </Text>
+              <Image 
+                source={{ uri: 'https://developers.google.com/static/identity/images/g-logo.png' }} 
+                style={styles.googleIcon} 
+              />
+              <View style={styles.googleTextContainer}>
+                  <Text style={styles.customGoogleButtonText}>Google</Text>
+              </View>
             </TouchableOpacity>
           </View>
-        </View>
-      </KeyboardAvoidingView>
+
+          {loading && <ActivityIndicator style={{ marginTop: 20, alignSelf: 'center' }} color="#fff" />}
+          {!!error && <Text style={styles.error}>{error}</Text>}
+
+          <Text style={styles.terms}>
+            En continuant, tu acceptes nos{' '}
+            <Text
+              style={styles.termsLink}
+              onPress={() => Linking.openURL('https://frensyapp-dev.github.io/frensy/terms.html')}
+            >
+              CGU
+            </Text>{' '}
+            et{' '}
+            <Text
+              style={styles.termsLink}
+              onPress={() => Linking.openURL('https://frensyapp-dev.github.io/frensy/privacy.html')}
+            >
+              Confidentialité
+            </Text>
+            .
+          </Text>
+        </GlassCard>
+      </View>
     </LinearGradient>
   );
 }
@@ -340,48 +283,51 @@ const styles = StyleSheet.create({
   glassCard: {
     width: '100%',
     maxWidth: 400,
-    backgroundColor: 'rgba(255,255,255,0.03)',
     borderRadius: 30,
-    padding: 24,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-    shadowColor: '#000',
-    shadowOpacity: 0.3,
-    shadowRadius: 20,
-    shadowOffset: { width: 0, height: 10 },
+    padding: 20,
+    alignItems: 'stretch', // S'assure que les enfants prennent toute la largeur
   },
   title: { fontSize: 32, fontWeight: '900', color: Colors.dark.text, textAlign: 'center', marginBottom: 8 },
   subtitle: { color: 'rgba(255,255,255,0.6)', textAlign: 'center', marginBottom: 32, fontSize: 16 },
   
-  inputGroup: { gap: 16, marginBottom: 20 },
-  inputRow: {
+  buttonContainer: {
+    width: '100%',
+    gap: 16,
+    alignItems: 'stretch', // Aligne les boutons sur toute la largeur
+  },
+  appleButtonContainer: {
+    width: '100%',
+    height: 52,
+    // On ajoute un wrapper shadow invisible qui correspond à ce que fait Google
+  },
+  appleButton: {
+    width: '100%',
+    height: 52,
+  },
+  customGoogleButton: {
+    width: '100%',
+    height: 52,
+    backgroundColor: 'white',
+    borderRadius: 26,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.3)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
-    paddingHorizontal: 16,
-    borderRadius: 16,
-    height: 56,
-  },
-  input: { flex: 1, fontSize: 16, color: Colors.dark.text, fontWeight: '600' },
-  
-  error: { color: Colors.dark.danger, textAlign: 'center', marginBottom: 16, fontWeight: '600' },
-  
-  primaryBtn: {
-    height: 56,
-    borderRadius: 28,
-    alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: Colors.dark.tint,
-    shadowColor: Colors.dark.tint,
-    shadowOpacity: 0.4,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-    marginBottom: 24,
+    paddingHorizontal: 16,
+    position: 'relative', // Ajout important pour le positionnement absolu du logo
   },
-  primaryTxt: { color: Colors.dark.text, fontSize: 18, fontWeight: '800', letterSpacing: 0.5 },
+  googleIcon: {
+    width: 20, // Légèrement réduit pour matcher la largeur visuelle de la pomme
+    height: 20,
+    position: 'absolute',
+    left: 20, // Remis à 20 pour correspondre exactement au placement du logo Apple
+  },
+  googleTextContainer: { flex: 1, alignItems: 'center' },
+  customGoogleButtonText: { color: '#000', fontSize: 18, fontWeight: '700' },
+  googleIcon: { width: 24, height: 24, position: 'absolute', left: 20 },
+
+  disabledButton: { opacity: 0.5 },
   
-  switchRow: { flexDirection: 'row', gap: 8, justifyContent: 'center', alignItems: 'center' },
-  link: { fontWeight: '700', color: Colors.dark.tint },
+  error: { color: Colors.dark.danger, textAlign: 'center', marginTop: 16, fontWeight: '600' },
+  terms: { color: 'rgba(255,255,255,0.35)', textAlign: 'center', marginTop: 18, fontSize: 12, lineHeight: 16 },
+  termsLink: { textDecorationLine: 'underline', color: 'rgba(255,255,255,0.6)' },
 });

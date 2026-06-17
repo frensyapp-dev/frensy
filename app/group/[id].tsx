@@ -14,12 +14,13 @@ import Avatar from '../../components/ui/Avatar';
 import { useToast } from '../../components/ui/Toast';
 import { Colors } from '../../constants/Colors';
 import { auth, db } from '../../firebaseconfig';
+import { useSubscription } from '../../hooks/useSubscription';
 import { upsertConversation } from '../../lib/chat/storage';
 import { castPollVote, postMessage, quitGroup } from '../../lib/groups/repo';
-import { FEATURE_COSTS, performActionUpdates } from '../../lib/monetization';
+import { canPerformAction, FEATURE_COSTS, performActionUpdates } from '../../lib/monetization';
 import { applyUserUpdates, getUserProfile, type UserProfile } from '../../lib/profile';
 import { reportGroup, reportMessage } from '../../lib/report';
-import { pickAndUploadMessageImage } from '../../lib/uploadImages';
+import { pickMessageMediaAsset, uploadPickedGroupImage } from '../../lib/uploadImages';
 
 import { checkPhotoSafety, REJECTION_MSG, validateMessage } from '../../lib/moderation';
 
@@ -38,7 +39,11 @@ export default function GroupChatScreen() {
   const { showToast } = useToast();
   const [draftPhoto, setDraftPhoto] = useState<string | null>(null);
   const [draftMediaType, setDraftMediaType] = useState<'image' | 'video'>('image');
+  const [draftLocalMediaUri, setDraftLocalMediaUri] = useState<string | null>(null);
+  const [draftMediaStatus, setDraftMediaStatus] = useState<'idle' | 'uploading' | 'analyzing' | 'error'>('idle');
+  const draftMediaTokenRef = useRef(0);
   const [myProfile, setMyProfile] = useState<UserProfile | null>(null);
+  const mySubscription = useSubscription(myProfile?.subscription);
 
   useEffect(() => {
     const me = auth.currentUser?.uid;
@@ -282,8 +287,13 @@ export default function GroupChatScreen() {
       setInput('');
       const photoToSend = draftPhoto;
       const mediaTypeToSend = draftMediaType;
-      setDraftPhoto(null);
-      setDraftMediaType('image');
+      if (photoToSend) {
+        setDraftPhoto(null);
+        setDraftMediaType('image');
+        setDraftLocalMediaUri(null);
+        setDraftMediaStatus('idle');
+        draftMediaTokenRef.current += 1;
+      }
       const reply = replyingTo;
       setReplyingTo(null);
 
@@ -326,7 +336,7 @@ export default function GroupChatScreen() {
       const profile = await getUserProfile(me);
       if (!profile) return;
 
-      const check = performActionUpdates(profile, 'SEND_PHOTO');
+      const check = canPerformAction(profile, 'SEND_PHOTO');
       if (!check.allowed) {
         Alert.alert(
           'Abonnement requis',
@@ -339,23 +349,55 @@ export default function GroupChatScreen() {
         return;
       }
 
-      if (check.updates) {
-          await applyUserUpdates(me, check.updates);
-      }
+      const isPro = mySubscription === 'PRO';
+      const asset = await pickMessageMediaAsset(false);
+      if (!asset) return;
+      if (asset.type === 'video') return;
 
-      const isPro = profile.subscription === 'PRO';
-      const res = await pickAndUploadMessageImage(id, 'group', isPro);
-      if (res) {
-        // Moderation
-        const safety = await checkPhotoSafety(res.url);
-        if (safety === 'rejected') {
-          showToast('Photo refusée', REJECTION_MSG, 'error');
-          return;
+      const token = draftMediaTokenRef.current + 1;
+      draftMediaTokenRef.current = token;
+      setDraftLocalMediaUri(asset.uri);
+      setDraftMediaStatus('uploading');
+      setDraftMediaType('image');
+
+      void (async () => {
+        try {
+          const res = await uploadPickedGroupImage(id, asset);
+          if (!res) return;
+          if (draftMediaTokenRef.current !== token) {
+            try {
+              const { getStorage, ref, deleteObject } = await import('firebase/storage');
+              await deleteObject(ref(getStorage(), res.path)).catch(() => {});
+            } catch {}
+            return;
+          }
+
+          if (res.type === 'image') {
+            setDraftMediaStatus('analyzing');
+            const safety = await checkPhotoSafety(res.url);
+            if (draftMediaTokenRef.current !== token) return;
+            if (safety === 'rejected') {
+              try {
+                const { getStorage, ref, deleteObject } = await import('firebase/storage');
+                await deleteObject(ref(getStorage(), res.path)).catch(() => {});
+              } catch {}
+              setDraftLocalMediaUri(null);
+              setDraftMediaStatus('error');
+              showToast('Photo refusée', REJECTION_MSG, 'error');
+              return;
+            }
+          }
+
+          setDraftPhoto(res.url);
+          setDraftLocalMediaUri(null);
+          setDraftMediaStatus('idle');
+          setDraftMediaType(res.type);
+        } catch (e: any) {
+          if (draftMediaTokenRef.current !== token) return;
+          setDraftMediaStatus('error');
+          showToast('Erreur', e?.message ?? "Impossible d'envoyer la photo", 'error');
         }
-
-        setDraftPhoto(res.url);
-        setDraftMediaType(res.type);
-      }
+      })();
     } catch (e: any) {
       showToast('Erreur', e.message, 'error');
     }
@@ -849,11 +891,16 @@ export default function GroupChatScreen() {
              paddingVertical: 4,
              minHeight: 40
            }}>
-             {draftPhoto && (
+             {(draftPhoto || draftLocalMediaUri) && (
                <View style={{ marginBottom: 8, marginTop: 8 }}>
-                 <ExpoImage source={{ uri: draftPhoto }} style={{ width: 100, height: 100, borderRadius: 8 }} />
+                 <ExpoImage source={{ uri: draftPhoto || draftLocalMediaUri! }} style={{ width: 100, height: 100, borderRadius: 8 }} />
+                 {(draftMediaStatus === 'uploading' || draftMediaStatus === 'analyzing') && (
+                    <View style={{ position: 'absolute', inset: 0, borderRadius: 8, backgroundColor: 'rgba(0,0,0,0.35)', alignItems: 'center', justifyContent: 'center' }}>
+                      <ActivityIndicator color="#fff" />
+                    </View>
+                 )}
                  <TouchableOpacity 
-                   onPress={() => setDraftPhoto(null)}
+                   onPress={() => { setDraftPhoto(null); setDraftLocalMediaUri(null); setDraftMediaStatus('idle'); draftMediaTokenRef.current += 1; }}
                    style={{ position: 'absolute', top: -6, left: 90, backgroundColor: '#000', borderRadius: 10 }}
                  >
                    <FontAwesome name="times-circle" size={20} color="#fff" />
@@ -862,7 +909,7 @@ export default function GroupChatScreen() {
              )}
              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                 <View style={{ alignItems: 'center', marginRight: 10 }}>
-                   <TouchableOpacity onPress={onSendImage}>
+                   <TouchableOpacity onPress={onSendImage} disabled={sending || draftMediaStatus === 'uploading' || draftMediaStatus === 'analyzing'}>
                        <FontAwesome name="camera" size={20} color="#888" />
                    </TouchableOpacity>
                    {myProfile?.subscription !== 'PRO' && myProfile?.subscription !== 'PLUS' && (
@@ -927,8 +974,8 @@ export default function GroupChatScreen() {
              <Animated.View style={{ ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.6)', opacity: fadeAnim }}>
                 <Pressable onPress={closeMembers} style={{ flex: 1 }} />
              </Animated.View>
-             <Animated.View style={[{ width: '100%' }, { transform: [{ translateY: slideAnim }] }]}>
-               <Pressable onPress={(e) => e.stopPropagation()} style={{ backgroundColor: '#1c1c1e', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 40, maxHeight: '80%', width: '100%', borderTopWidth: 1, borderColor: '#333', shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.3, shadowRadius: 10, elevation: 20 }}>
+             <Animated.View style={[{ width: '100%', height: '70%' }, { transform: [{ translateY: slideAnim }] }]}>
+               <View style={{ backgroundColor: '#1c1c1e', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 0, flex: 1, borderTopWidth: 1, borderColor: '#333', shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.3, shadowRadius: 10, elevation: 20 }}>
                   {/* Handle */}
                   <View style={{ width: 40, height: 4, backgroundColor: '#444', borderRadius: 2, alignSelf: 'center', marginBottom: 24 }} />
                   
@@ -937,9 +984,10 @@ export default function GroupChatScreen() {
 
                   <FlatList 
                     data={sortedMembers} 
-                    style={{ flexShrink: 1 }}
+                    style={{ flex: 1 }}
                     keyExtractor={(m) => m.id} 
-                    contentContainerStyle={{ gap: 12, paddingBottom: 20 }} 
+                    contentContainerStyle={{ gap: 12, paddingBottom: 100 }} 
+                    showsVerticalScrollIndicator={false}
                     renderItem={({ item }) => {
                       const isMe = item.id === auth.currentUser?.uid;
                       return (
@@ -967,10 +1015,10 @@ export default function GroupChatScreen() {
                     }}
                   />
                   
-                  <TouchableOpacity onPress={closeMembers} style={{ marginTop: 8, padding: 16, borderRadius: 16, backgroundColor: '#333', alignItems: 'center' }}>
+                  <TouchableOpacity onPress={closeMembers} style={{ position: 'absolute', bottom: 30, left: 24, right: 24, padding: 16, borderRadius: 16, backgroundColor: '#333', alignItems: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 5, elevation: 10 }}>
                     <Text style={{ fontWeight: '600', color: '#fff', fontSize: 16 }}>Fermer</Text>
                   </TouchableOpacity>
-               </Pressable>
+               </View>
              </Animated.View>
           </View>
         </Modal>

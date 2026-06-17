@@ -7,10 +7,13 @@ export type Group = {
   id: string
   name: string
   memberCount: number
+  maxMembers?: number
   city?: string
   description?: string
   ageLock?: 'adult'
 }
+
+export const DEFAULT_MAX_GROUP_MEMBERS = 10
 
 export async function listGroups(options?: {
   limit?: number
@@ -49,6 +52,7 @@ export async function listGroups(options?: {
     id: d.id,
     name: (d.data() as any).name || 'Groupe',
     memberCount: (d.data() as any).memberCount || 0,
+    maxMembers: (d.data() as any).maxMembers || DEFAULT_MAX_GROUP_MEMBERS,
     city: (d.data() as any).city,
     description: (d.data() as any).description,
     ageLock: (d.data() as any).ageLock,
@@ -79,6 +83,7 @@ export async function createGroup(data: { name: string; description?: string }):
     createdBy: uid,
     createdAt: Date.now(),
     memberCount: 0,
+    maxMembers: DEFAULT_MAX_GROUP_MEMBERS,
   });
 
   // Add creator as member
@@ -105,11 +110,19 @@ export async function createGroup(data: { name: string; description?: string }):
 
 export async function joinGroup(uid: string, groupId: string): Promise<void> {
   // Charger le groupe et le profil (si besoin)
-  const [group] = await Promise.all([
+  const [group, membersSnap] = await Promise.all([
      getGroup(groupId),
+     getDocs(collection(db, 'groups', groupId, 'members')),
   ]);
   
   if (!group) throw new Error("Groupe introuvable");
+  const maxMembers = group.maxMembers || DEFAULT_MAX_GROUP_MEMBERS;
+  if (membersSnap.docs.some((docSnap) => docSnap.id === uid)) {
+    return;
+  }
+  if (membersSnap.size >= maxMembers) {
+    throw new Error('GROUP_FULL');
+  }
 
   // Tentative 1: Méthode complète avec incrément (peut échouer selon les règles)
   try {
@@ -176,6 +189,7 @@ export async function getGroupsByIds(ids: string[]): Promise<Group[]> {
         id: d.id,
         name: data.name || 'Groupe',
         memberCount: data.memberCount || 0,
+        maxMembers: data.maxMembers || DEFAULT_MAX_GROUP_MEMBERS,
         city: data.city,
         description: data.description,
         ageLock: data.ageLock,
@@ -193,6 +207,7 @@ export async function getGroup(groupId: string): Promise<Group | null> {
     id: d.id,
     name: data.name || 'Groupe',
     memberCount: data.memberCount || 0,
+    maxMembers: data.maxMembers || DEFAULT_MAX_GROUP_MEMBERS,
     city: data.city,
     description: data.description,
     ageLock: data.ageLock,

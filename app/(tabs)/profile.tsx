@@ -1,5 +1,6 @@
 // app/(tabs)/profile.tsx
 import FontAwesome from '@expo/vector-icons/FontAwesome';
+import { useFocusEffect } from '@react-navigation/native';
 import dayjs from 'dayjs';
 import { Image as ExpoImage } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -10,7 +11,6 @@ import { getDownloadURL, getStorage, ref } from 'firebase/storage';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
     ActivityIndicator,
-    Alert,
     Animated,
     Dimensions,
     Easing,
@@ -33,12 +33,15 @@ import ReAnimated, { runOnJS, useAnimatedStyle, useSharedValue, withSpring } fro
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Logo from '../../assets/images/frensylogo.png';
 import Avatar from '../../components/ui/Avatar';
+import { useDialog } from '../../components/ui/Dialog';
 import { useToast } from '../../components/ui/Toast';
 import { Colors } from '../../constants/Colors';
 import { auth } from '../../firebaseconfig';
+import { useSubscription } from '../../hooks/useSubscription';
 import { checkPhotoSafety, NO_FACE_MSG, REJECTION_MSG, validateName } from '../../lib/moderation';
 import { getLimits, performActionUpdates } from '../../lib/monetization';
 import { applyUserUpdates, getUserProfile, userDocRef, userPrivateRef, UserProfile } from '../../lib/profile';
+import { syncRevenueCatPurchases } from '../../lib/revenuecat';
 import { pickProfilePhotoOnly, processAndUploadProfilePhoto } from '../../lib/uploadImages';
 
 const AnimatedImage = ReAnimated.createAnimatedComponent(ExpoImage);
@@ -56,6 +59,7 @@ const screenW = Dimensions.get('window').width;
 export default function ProfileScreen() {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const { showToast } = useToast();
+  const { alert, confirm } = useDialog();
   const [refreshing, setRefreshing] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
@@ -67,12 +71,18 @@ export default function ProfileScreen() {
   const [replaceOpen, setReplaceOpen] = useState(false);
   const [photoToReplace, setPhotoToReplace] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
 
-  const limits = useMemo(() => getLimits(profile?.subscription || 'FREE'), [profile?.subscription]);
+  const [showGoldInvites, setShowGoldInvites] = useState(false);
+
+  const effectiveSubscription = useSubscription(profile?.subscription);
+   const limits = useMemo(() => getLimits(effectiveSubscription), [effectiveSubscription]);
   const boostLimit = limits.boostPerWeek;
   const boostUsed = profile?.boostsUsedThisWeek || 0;
-  const boostRemaining = Math.max(0, boostLimit - boostUsed);
-  const boostDisplay = boostLimit === 0 ? '0' : (boostLimit === Infinity ? '∞' : `${boostRemaining}/${boostLimit}`);
+  const bonusBoosts = profile?.bonusBoosts || 0;
+  const boostRemaining = Math.max(0, (Number.isFinite(boostLimit) ? boostLimit : 0) - boostUsed);
+  const boostAvailableTotal = (boostLimit === Infinity ? Infinity : boostRemaining + bonusBoosts);
+  const boostDisplay = boostAvailableTotal === Infinity ? '∞' : String(boostAvailableTotal);
 
   const inviteLimit = limits.invitesPerDay;
   const inviteUsed = profile?.invitesUsedToday || 0;
@@ -81,6 +91,13 @@ export default function ProfileScreen() {
   const inviteAvailableTotal = (inviteLimit === Infinity ? Infinity : inviteRemaining + bonusInvites);
   const inviteDisplay = inviteAvailableTotal === Infinity ? '∞' : String(inviteAvailableTotal);
 
+  const superInviteLimit = limits.superInvitesPerWeek;
+  const superInviteUsed = profile?.superInvitesUsedThisWeek || 0;
+  const bonusSuperInvites = profile?.bonusSuperInvites || 0;
+  const superInviteRemaining = Math.max(0, (Number.isFinite(superInviteLimit) ? superInviteLimit : 0) - superInviteUsed);
+  const superInviteAvailableTotal = (superInviteLimit === Infinity ? Infinity : superInviteRemaining + bonusSuperInvites);
+  const superInviteDisplay = superInviteAvailableTotal === Infinity ? '∞' : String(superInviteAvailableTotal);
+
   const undoLimit = limits.undoPerDay;
   const undoUsed = profile?.undoUsedToday || 0;
   const bonusUndos = profile?.bonusUndos || 0;
@@ -88,7 +105,8 @@ export default function ProfileScreen() {
   const undoAvailableTotal = (undoLimit === Infinity ? Infinity : undoRemaining + bonusUndos);
   const undoDisplay = undoAvailableTotal === Infinity ? '∞' : String(undoAvailableTotal);
 
-  const revealDisplay = limits.showLikesDetails ? 'Illimité' : 'Payant';
+  const bonusUnlockLikes = profile?.bonusUnlockLikes || 0;
+  const revealDisplay = limits.showLikesDetails ? '∞' : String(bonusUnlockLikes);
   
   // Missing states restored
   const [cropOpen, setCropOpen] = useState(false);
@@ -182,8 +200,8 @@ export default function ProfileScreen() {
                 const data = docSnap.data() as UserProfile;
                 data.uid = uid;
                 
-                // Recalculate age locally
-                if (data.birthDate) {
+                // Legacy fallback: only derive age from birthDate when no explicit age is stored.
+                if (typeof data.age !== 'number' && data.birthDate) {
                     try {
                         const calculatedAge = dayjs().diff(dayjs(data.birthDate), 'year');
                         if (typeof calculatedAge === 'number' && !isNaN(calculatedAge)) {
@@ -255,6 +273,18 @@ export default function ProfileScreen() {
     });
     return unsub;
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      (async () => {
+        await syncRevenueCatPurchases().catch(() => null);
+        if (cancelled) return;
+        await load();
+      })();
+      return () => { cancelled = true; };
+    }, [load])
+  );
 
   // Removed duplicate useFocusEffect since onSnapshot handles updates
   // But kept onRefresh for Pull-to-Refresh functionality
@@ -367,10 +397,11 @@ export default function ProfileScreen() {
       
       const check = validateName(trimmed);
       if (!check.valid) {
-        Alert.alert('Nom invalide', check.error);
+        alert('Nom invalide', check.error);
         return;
       }
       
+      setIsProcessing(true);
       // Format: Capitalize first letter
       const formatted = trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
 
@@ -379,12 +410,15 @@ export default function ProfileScreen() {
       await onRefresh();
     } catch (e: any) {
       showToast('Erreur', e?.message ?? String(e), 'error');
+    } finally {
+      setIsProcessing(false);
     }
   }, [db, nameDraft, onRefresh]);
 
   const saveAvatarFocus = useCallback(async () => {
     try {
       const uid = auth.currentUser?.uid; if (!uid) return;
+      setIsProcessing(true);
       // Note: On sauvegarde les valeurs "draft" qui ont été mises à jour par le Cropper
       const clampZoom = (z: number) => Math.max(1, Math.min(3, z)); // Max zoom 3 comme dans add-photo
       await updateDoc(doc(db, 'users', uid), { 
@@ -396,6 +430,7 @@ export default function ProfileScreen() {
       await onRefresh();
       showToast('Succès', 'Cadrage mis à jour', 'success');
     } catch (e: any) { showToast('Erreur', e?.message ?? String(e), 'error'); }
+    finally { setIsProcessing(false); }
   }, [db, focusDraftX, focusDraft, zoomDraft, onRefresh]);
 
   // Removed unused saveNote
@@ -487,7 +522,7 @@ export default function ProfileScreen() {
         return;
       }
 
-      Alert.alert('Supprimer', 'Veux-tu vraiment supprimer cette photo ?', [
+      alert('Supprimer', 'Veux-tu vraiment supprimer cette photo ?', [
         { text: 'Annuler', style: 'cancel' },
         { text: 'Supprimer', style: 'destructive', onPress: async () => {
             try {
@@ -507,7 +542,7 @@ export default function ProfileScreen() {
                 setPhotoToReplace(null);
                 await onRefresh();
             } catch (e: any) {
-                Alert.alert('Erreur', e?.message ?? String(e));
+                alert('Erreur', e?.message ?? String(e));
             }
         }}
       ]);
@@ -518,7 +553,7 @@ export default function ProfileScreen() {
     
     const now = Date.now();
     if (profile.boostExpiresAt && profile.boostExpiresAt > now) {
-        Alert.alert('Boost actif', `Votre boost est encore actif pour ${Math.ceil((profile.boostExpiresAt - now) / 60000)} minutes.`);
+        alert('Boost actif', `Votre boost est encore actif pour ${Math.ceil((profile.boostExpiresAt - now) / 60000)} minutes.`);
         return;
     }
 
@@ -527,7 +562,7 @@ export default function ProfileScreen() {
 
     if (!check.allowed) {
         if (check.reason === 'insufficient_coins') {
-             Alert.alert('Pins insuffisants', 'Achetez des pins pour booster votre profil !', [
+             alert('Pins insuffisants', 'Achetez des pins pour booster votre profil !', [
                  { text: 'Annuler', style: 'cancel' },
                  { text: 'Boutique', onPress: () => Router.push({ pathname: '/store', params: { tab: 'coins' } } as any) }
              ]);
@@ -543,12 +578,13 @@ export default function ProfileScreen() {
         confirmMessage = `Utiliser un boost gratuit ? (Durée 10 min)`;
     }
 
-    Alert.alert('Booster le profil', confirmMessage, [
+    alert('Booster le profil', confirmMessage, [
         { text: 'Annuler', style: 'cancel' },
         { 
             text: 'Booster 🚀', 
             onPress: async () => {
                 try {
+                    setIsProcessing(true);
                     const boostDuration = 10 * 60 * 1000; // 10 minutes
                     const expiresAt = Date.now() + boostDuration;
                     
@@ -570,6 +606,8 @@ export default function ProfileScreen() {
                 } catch (e) {
                     console.error(e);
                     showToast('Erreur', 'Impossible d\'activer le boost.', 'error');
+                } finally {
+                    setIsProcessing(false);
                 }
             }
         }
@@ -662,7 +700,7 @@ export default function ProfileScreen() {
                   initials={initials} 
                   size={128} 
                   ring 
-                  ringColor={profile?.subscription === 'PRO' ? Colors.dark.gold : Colors.dark.tint} 
+                  ringColor={effectiveSubscription === 'PRO' ? Colors.dark.gold : (effectiveSubscription === 'PLUS' ? '#EA4C89' : Colors.dark.tint)} 
                   ringWidth={3} 
                   focusX={profile?.avatarFocusX ?? 0.5} 
                   focusY={profile?.avatarFocusY ?? 0.5} 
@@ -701,8 +739,8 @@ export default function ProfileScreen() {
                </TouchableOpacity>
                <View style={s.statDivider} />
                <TouchableOpacity style={s.statItem} onPress={() => Router.push({ pathname: '/store', params: { tab: 'subs' } } as any)}>
-                  <Text style={[s.statValue, { color: profile?.subscription === 'PRO' ? Colors.dark.gold : (profile?.subscription === 'PLUS' ? '#EA4C89' : Colors.dark.text) }]}>
-                    {profile?.subscription || 'FREE'}
+                  <Text style={[s.statValue, { color: effectiveSubscription === 'PRO' ? Colors.dark.gold : (effectiveSubscription === 'PLUS' ? '#EA4C89' : Colors.dark.text) }]}>
+                    {effectiveSubscription}
                   </Text>
                   <Text style={s.statLabel}>Abonnement</Text>
                </TouchableOpacity>
@@ -828,17 +866,41 @@ export default function ProfileScreen() {
                   </TouchableOpacity>
 
                   {/* Invites */}
-                  <View 
-                      style={{ flex: 1, minWidth: '45%', backgroundColor: Colors.dark.card, borderRadius: 20, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 12 }} 
+                  <TouchableOpacity 
+                      onPress={() => setShowGoldInvites(!showGoldInvites)}
+                      activeOpacity={0.8}
+                      style={{ 
+                        flex: 1, 
+                        minWidth: '45%', 
+                        backgroundColor: showGoldInvites ? 'rgba(255, 215, 0, 0.1)' : Colors.dark.card, 
+                        borderRadius: 20, 
+                        padding: 16, 
+                        flexDirection: 'row', 
+                        alignItems: 'center', 
+                        gap: 12,
+                        borderWidth: 1,
+                        borderColor: showGoldInvites ? 'rgba(255, 215, 0, 0.3)' : 'transparent'
+                      }} 
                   >
-                      <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(59, 130, 246, 0.15)', justifyContent: 'center', alignItems: 'center' }}>
-                          <Text style={{ fontSize: 18 }}>💌</Text>
+                      <View style={{ 
+                        width: 40, 
+                        height: 40, 
+                        borderRadius: 20, 
+                        backgroundColor: showGoldInvites ? 'rgba(255, 215, 0, 0.15)' : 'rgba(59, 130, 246, 0.15)', 
+                        justifyContent: 'center', 
+                        alignItems: 'center' 
+                      }}>
+                          <Text style={{ fontSize: 18 }}>{showGoldInvites ? '✨' : '💌'}</Text>
                       </View>
                       <View>
-                          <Text style={{ color: Colors.dark.text, fontSize: 18, fontWeight: '800' }}>{inviteDisplay}</Text>
-                          <Text style={{ color: Colors.dark.subtleText, fontSize: 12, fontWeight: '600' }}>Invites</Text>
+                          <Text style={{ color: showGoldInvites ? '#FFD700' : Colors.dark.text, fontSize: 18, fontWeight: '800' }}>
+                            {showGoldInvites ? superInviteDisplay : inviteDisplay}
+                          </Text>
+                          <Text style={{ color: Colors.dark.subtleText, fontSize: 12, fontWeight: '600' }}>
+                            {showGoldInvites ? 'Invites Gold' : 'Invites'}
+                          </Text>
                       </View>
-                  </View>
+                  </TouchableOpacity>
 
                   {/* Revelations */}
                   <View 
@@ -926,7 +988,6 @@ export default function ProfileScreen() {
            <FontAwesome name="bolt" size={12} color="#fff" />
            <Text style={{ color: '#fff', fontSize: 12, fontWeight: '900', letterSpacing: 2 }}>FRENSY</Text>
         </View>
-
       </ScrollView>
 
       {/* Modal édition nom */}
@@ -953,11 +1014,11 @@ export default function ProfileScreen() {
                   />
                   
                   <View style={{ flexDirection: 'row', gap: 12 }}>
-                    <TouchableOpacity onPress={closeEdit} style={{ flex: 1, padding: 16, borderRadius: 16, backgroundColor: '#333', alignItems: 'center' }}>
+                    <TouchableOpacity onPress={closeEdit} disabled={isProcessing} style={{ flex: 1, padding: 16, borderRadius: 16, backgroundColor: '#333', alignItems: 'center' }}>
                       <Text style={{ fontWeight: '600', color: '#fff', fontSize: 16 }}>Annuler</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity onPress={saveName} style={{ flex: 1, padding: 16, borderRadius: 16, backgroundColor: '#F97316', alignItems: 'center' }}>
-                      <Text style={{ fontWeight: '700', color: '#000', fontSize: 16 }}>Enregistrer</Text>
+                    <TouchableOpacity onPress={saveName} disabled={isProcessing} style={{ flex: 1, padding: 16, borderRadius: 16, backgroundColor: '#F97316', alignItems: 'center', opacity: isProcessing ? 0.7 : 1 }}>
+                      {isProcessing ? <ActivityIndicator color="#000" /> : <Text style={{ fontWeight: '700', color: '#000', fontSize: 16 }}>Enregistrer</Text>}
                     </TouchableOpacity>
                   </View>
                </Pressable>
@@ -1008,11 +1069,11 @@ export default function ProfileScreen() {
                 )}
 
                 <View style={{ flexDirection: 'row', gap: 12 }}>
-                  <TouchableOpacity onPress={closeCrop} style={{ flex: 1, padding: 16, borderRadius: 16, backgroundColor: '#333', alignItems: 'center' }}>
+                  <TouchableOpacity onPress={closeCrop} disabled={isProcessing} style={{ flex: 1, padding: 16, borderRadius: 16, backgroundColor: '#333', alignItems: 'center' }}>
                     <Text style={{ fontWeight: '600', color: '#fff', fontSize: 16 }}>Annuler</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity onPress={async () => { await saveAvatarFocus(); closeCrop(); }} style={{ flex: 1, padding: 16, borderRadius: 16, backgroundColor: '#F97316', alignItems: 'center' }}>
-                    <Text style={{ fontWeight: '700', color: '#000', fontSize: 16 }}>Enregistrer</Text>
+                  <TouchableOpacity onPress={async () => { await saveAvatarFocus(); closeCrop(); }} disabled={isProcessing} style={{ flex: 1, padding: 16, borderRadius: 16, backgroundColor: '#F97316', alignItems: 'center', opacity: isProcessing ? 0.7 : 1 }}>
+                    {isProcessing ? <ActivityIndicator color="#000" /> : <Text style={{ fontWeight: '700', color: '#000', fontSize: 16 }}>Enregistrer</Text>}
                   </TouchableOpacity>
                 </View>
               </Pressable>

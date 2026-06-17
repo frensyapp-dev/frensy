@@ -3,6 +3,7 @@ import { Text, Pressable, StyleSheet, ViewStyle, ColorValue, ActivityIndicator }
 import { LinearGradient } from 'expo-linear-gradient';
 import Animated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 import { Colors } from '../../constants/Colors';
+import { hapticTap } from '../../lib/haptics';
 
 type Props = {
   label: string;
@@ -43,7 +44,12 @@ export function GradientButton({ label, onPress, style, disabled, loading, varia
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel || label}
       onPress={!loading ? onPress : undefined}
-      onPressIn={() => { if (!loading && !disabled) scale.value = withSpring(0.96, { damping: 10 }); }}
+      onPressIn={() => {
+        if (!loading && !disabled) {
+          scale.value = withSpring(0.96, { damping: 10 });
+          hapticTap();
+        }
+      }}
       onPressOut={() => { if (!loading && !disabled) scale.value = withSpring(1, { damping: 10 }); }}
       style={[style, { opacity: disabled ? 0.6 : 1 }]}
       disabled={disabled || loading}

@@ -5,25 +5,26 @@ import { getAuth } from 'firebase/auth';
 import { DocumentSnapshot, collection, getDocs, limit, query } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    ActivityIndicator,
-    Alert,
-    Animated,
-    Dimensions,
-    Easing,
-    FlatList,
-    KeyboardAvoidingView,
-    Modal,
-    Platform,
-    Pressable,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View
+  ActivityIndicator,
+  Alert,
+  Animated,
+  Dimensions,
+  Easing,
+  FlatList,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from 'react-native';
 import { Colors } from '../../constants/Colors';
 import { db } from '../../firebaseconfig';
 import { Group, createGroup, getGroupsByIds, joinGroup, listGroups } from '../../lib/groups/repo';
+import { hapticConfirm, hapticSuccess, hapticWarning } from '../../lib/haptics';
 import { performActionUpdates } from '../../lib/monetization';
 import { applyUserUpdates, getUserProfile } from '../../lib/profile';
 
@@ -56,6 +57,7 @@ export function GroupView({
 
   // Stabiliser la dépendance joinedGroups pour éviter les re-renders infinis
   const joinedGroupsHash = useMemo(() => Array.from(joinedGroups).sort().join(','), [joinedGroups]);
+  const joinedGroupsStable = useMemo(() => new Set(Array.from(joinedGroups)), [joinedGroups, joinedGroupsHash]);
 
   const sortedGroups = useMemo(() => {
     if (!Array.isArray(groups)) return [];
@@ -85,9 +87,9 @@ export function GroupView({
     async (reset = false, silent = false) => {
       if (loadingRef.current && !reset) return;
       
+      loadingRef.current = true;
       if (!silent) {
         setLoading(true);
-        loadingRef.current = true;
       }
       
       try {
@@ -99,7 +101,7 @@ export function GroupView({
 
         if (activeTab === ('mine' as Tab)) {
           // Utiliser le Set actuel (joinedGroups est stable dans le contexte du rendu, mais on utilise le hash pour la dépendance)
-          const ids = Array.from(joinedGroups);
+          const ids = Array.from(joinedGroupsStable);
           if (ids.length === 0) {
             setGroups([]);
             setHasMore(false);
@@ -124,7 +126,7 @@ export function GroupView({
 
         if (activeTab === ('mine' as Tab)) {
           // Fallback au cas où
-          const myGroups = newGroups.filter(g => joinedGroups.has(g.id));
+          const myGroups = newGroups.filter(g => joinedGroupsStable.has(g.id));
           setGroups(prev => (reset ? myGroups : [...prev, ...myGroups]));
         } else {
           setGroups(prev => (reset ? newGroups : [...prev, ...newGroups]));
@@ -142,7 +144,7 @@ export function GroupView({
     },
     // On utilise joinedGroupsHash au lieu de joinedGroups pour éviter que la fonction ne change à chaque render du parent
     // On retire loading des dépendances car on utilise loadingRef
-    [activeTab, joinedGroupsHash, lastDoc, searchText, selectedCity]
+    [activeTab, joinedGroupsStable, lastDoc, searchText, selectedCity]
   );
 
   // Debounce search
@@ -174,6 +176,7 @@ export function GroupView({
             const uid = getAuth().currentUser?.uid;
             if (uid) {
               await joinGroup(uid, id);
+              hapticSuccess();
               onJoinGroup(id);
               
               // Update local state for immediate feedback
@@ -184,7 +187,13 @@ export function GroupView({
               // Navigate to group or refresh
               router.push(`/group/${id}` as any);
             }
-          } catch {
+          } catch (e: any) {
+            if (e?.message === 'GROUP_FULL') {
+              hapticWarning();
+              Alert.alert('Groupe complet', 'Ce groupe a atteint son nombre maximum de membres.');
+              return;
+            }
+            hapticWarning();
             Alert.alert('Erreur', 'Impossible de rejoindre le groupe');
           }
         }
@@ -320,7 +329,6 @@ const GroupCard = React.memo(function GroupCard({ item, joined, pinned, onJoin, 
   useEffect(() => {
     let active = true;
     (async () => {
-      if (item.memberCount === 0) return;
       // Optimisation: ne pas charger les avatars si on est déjà en train de scroller vite ou si déjà chargés ?
       // Pour l'instant, on laisse tel quel mais le React.memo aidera à éviter les re-renders inutiles
       
@@ -367,7 +375,7 @@ const GroupCard = React.memo(function GroupCard({ item, joined, pinned, onJoin, 
         <View style={{ flex: 1 }}>
           <Text style={{ color: C.text, fontSize: 18, fontWeight: '700', marginBottom: 4 }}>{item.name}</Text>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-             <Text style={{ color: C.success, fontSize: 14, fontWeight: '600' }}>{item.memberCount} membres</Text>
+             <Text style={{ color: C.success, fontSize: 14, fontWeight: '600' }}>{item.memberCount}/{item.maxMembers || 10} membres</Text>
           </View>
           {item.city && (
             <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
@@ -402,8 +410,8 @@ const GroupCard = React.memo(function GroupCard({ item, joined, pinned, onJoin, 
             <Text style={{ color: C.text, fontWeight: '600' }}>Ouvrir</Text>
           </TouchableOpacity>
         ) : (
-          <TouchableOpacity onPress={onJoin} style={{ backgroundColor: C.tint, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20 }}>
-            <Text style={{ color: C.text, fontWeight: '700' }}>Rejoindre</Text>
+          <TouchableOpacity onPress={onJoin} disabled={(item.memberCount || 0) >= (item.maxMembers || 10)} style={{ backgroundColor: (item.memberCount || 0) >= (item.maxMembers || 10) ? C.panel : C.tint, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, opacity: (item.memberCount || 0) >= (item.maxMembers || 10) ? 0.7 : 1 }}>
+            <Text style={{ color: C.text, fontWeight: '700' }}>{(item.memberCount || 0) >= (item.maxMembers || 10) ? 'Complet' : 'Rejoindre'}</Text>
           </TouchableOpacity>
         )}
         
@@ -461,7 +469,10 @@ function CreateGroupModal({ visible, onClose, onJoinGroup }: { visible: boolean;
   };
 
   async function handleCreate() {
-    if (!name.trim()) return Alert.alert('Erreur', 'Le nom du groupe est requis');
+    if (!name.trim()) {
+      hapticWarning();
+      return Alert.alert('Erreur', 'Le nom du groupe est requis');
+    }
     setCreating(true);
     try {
       const uid = getAuth().currentUser?.uid;
@@ -473,6 +484,7 @@ function CreateGroupModal({ visible, onClose, onJoinGroup }: { visible: boolean;
 
       const check = performActionUpdates(profile, 'CREATE_GROUP');
       if (!check.allowed) {
+        hapticWarning();
         if (check.reason === 'subscription_required') {
            Alert.alert('Abonnement requis', 'Il faut un abonnement pour créer des groupes.', [
              { text: 'Annuler', style: 'cancel' },
@@ -498,9 +510,11 @@ function CreateGroupModal({ visible, onClose, onJoinGroup }: { visible: boolean;
       onJoinGroup(id);
       closeAnimate();
       setName('');
+      hapticSuccess();
       Alert.alert('Succès', 'Groupe créé avec succès !');
       router.push(`/group/${id}` as any);
     } catch {
+      hapticWarning();
       Alert.alert('Erreur', 'Impossible de créer le groupe');
     } finally {
       setCreating(false);
@@ -535,7 +549,7 @@ function CreateGroupModal({ visible, onClose, onJoinGroup }: { visible: boolean;
               />
 
               <View style={{ flexDirection: 'row', gap: 12 }}>
-                  <TouchableOpacity onPress={closeAnimate} style={{ flex: 1, padding: 16, borderRadius: 16, backgroundColor: Colors['dark'].panel, alignItems: 'center' }}>
+                  <TouchableOpacity onPress={() => { hapticConfirm(); closeAnimate(); }} style={{ flex: 1, padding: 16, borderRadius: 16, backgroundColor: Colors['dark'].panel, alignItems: 'center' }}>
                       <Text style={{ fontWeight: '600', color: Colors['dark'].text, fontSize: 16 }}>Annuler</Text>
                   </TouchableOpacity>
                   <TouchableOpacity

@@ -99,6 +99,13 @@ export async function deleteEntireUserAccount(): Promise<void> {
   // 5) Supprimer ma position et mon profil
   try { await deleteDoc(doc(db, 'positions', uid)); } catch {}
   try { await deleteDoc(doc(db, 'users', uid)); } catch {}
+  try { await deleteDoc(doc(db, 'users', uid, 'private', 'settings')); } catch {}
+  try { await deleteDoc(doc(db, 'blocks', uid)); } catch {}
+  try {
+    const blockUsers = await getDocs(collection(db, 'blocks', uid, 'users'));
+    for (const d of blockUsers.docs) { try { await deleteDoc(d.ref); } catch {} }
+  } catch {}
+  try { await deleteDoc(doc(db, 'moderation_photos', uid)); } catch {}
 
   // 6) Purge locale des caches liés au chat pour cet uid
   try {

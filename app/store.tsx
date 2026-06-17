@@ -1,21 +1,85 @@
 import { Ionicons } from '@expo/vector-icons';
 import dayjs from 'dayjs';
+import Constants from 'expo-constants';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { onSnapshot } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
-import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, Image, Linking, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, Animated, Image, Linking, Modal, Pressable, ScrollView, Share, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { PurchasesPackage } from 'react-native-purchases';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useDialog } from '../components/ui/Dialog';
 import { useToast } from '../components/ui/Toast';
 import { Colors } from '../constants/Colors';
 import { auth, functions } from '../firebaseconfig';
-import { COIN_PACKS, FEATURE_COSTS, SUBSCRIPTION_PLANS } from '../lib/monetization';
+import { COIN_PACKS, FEATURE_COSTS, lastActivationCache, SUBSCRIPTION_PLANS, type SubscriptionTier } from '../lib/monetization';
 import { userDocRef, userPrivateRef } from '../lib/profile';
-import { getOfferings, initRevenueCat, purchasePackage, restorePurchases } from '../lib/revenuecat';
+import { getOfferings, getRevenueCatConfigError, initRevenueCat, isRevenueCatConfigured, purchasePackage, restorePurchases, syncRevenueCatPurchases } from '../lib/revenuecat';
 
 const PINS_IMG = require('../assets/images/pins2.png');
+
+const TERMS_URL = 'https://frensyapp-dev.github.io/frensy/terms.html';
+
+function privacyPolicyUrl(): string {
+  const extra =
+    (Constants.expoConfig as any)?.extra ||
+    (Constants as any)?.manifest?.extra ||
+    (Constants as any)?.manifest2?.extra ||
+    {};
+  const u = (extra as any)?.privacyPolicyUrl;
+  return typeof u === 'string' && u.trim().length > 0 ? u.trim() : 'https://frensyapp-dev.github.io/frensy/privacy.html';
+}
+
+const FEATURES_CONFIG: any = {
+  BOOST: {
+    title: 'Booster mon profil',
+    icon: '🚀',
+    description: 'Soyez vu par plus de monde pendant 30 min !',
+    packs: [
+      { count: 1, price: FEATURE_COSTS.BOOST, id: 'BOOST', label: '1 Boost' },
+      { count: 5, price: FEATURE_COSTS.BOOST_BUNDLE_5, id: 'BOOST_BUNDLE_5', label: '5 Boosts', tag: 'ECONOMIQUE', savings: '20%' },
+    ]
+  },
+  SUPER_INVITE: {
+    title: 'Super Invite',
+    icon: '💌',
+    description: 'Envoyez une invitation qui se démarque !',
+    packs: [
+      { count: 1, price: FEATURE_COSTS.SUPER_INVITE, id: 'SUPER_INVITE', label: '1 Super Invite' },
+      { count: 5, price: FEATURE_COSTS.SUPER_INVITE_BUNDLE_5, id: 'SUPER_INVITE_BUNDLE_5', label: '5 Super Invites', tag: 'POPULAIRE', savings: '16%' },
+      { count: 15, price: FEATURE_COSTS.SUPER_INVITE_BUNDLE_15, id: 'SUPER_INVITE_BUNDLE_15', label: '15 Super Invites', tag: 'BEST VALUE', savings: '38%' },
+    ]
+  },
+  UNLOCK_LIKE: {
+    title: 'Reveler un interet',
+    icon: '👁️',
+    description: 'Decouvrez qui a manifeste un interet pour votre profil.',
+    packs: [
+      { count: 1, price: FEATURE_COSTS.UNLOCK_LIKE, id: 'UNLOCK_LIKE', label: '1 Révélation' },
+      { count: 10, price: FEATURE_COSTS.UNLOCK_LIKE_BUNDLE_10, id: 'UNLOCK_LIKE_BUNDLE_10', label: '10 Révélations', tag: 'ECONOMIQUE', savings: '16%' },
+    ]
+  },
+  INVITE: {
+    title: 'Invitations',
+    icon: '✉️',
+    description: 'Invitez plus de personnes à discuter !',
+    packs: [
+      { count: 1, price: FEATURE_COSTS.INVITE, id: 'INVITE', label: '1 Invitation' },
+      { count: 5, price: FEATURE_COSTS.INVITE_BUNDLE_5, id: 'INVITE_BUNDLE_5', label: '5 Invitations', tag: 'POPULAIRE', savings: '16%' },
+      { count: 15, price: FEATURE_COSTS.INVITE_BUNDLE_15, id: 'INVITE_BUNDLE_15', label: '15 Invitations', tag: 'BEST VALUE', savings: '27%' },
+    ]
+  },
+  UNDO: {
+    title: 'Annuler un swipe',
+    icon: '↩️',
+    description: 'Revenez en arrière sur votre dernier swipe à gauche.',
+    packs: [
+      { count: 1, price: FEATURE_COSTS.UNDO, id: 'UNDO', label: '1 Undo' },
+      { count: 10, price: FEATURE_COSTS.UNDO_BUNDLE_10, id: 'UNDO_BUNDLE_10', label: '10 Undos', tag: 'ECONOMIQUE', savings: '25%' },
+    ]
+  }
+};
 
 const REWARDS = [
   { day: 1, label: '5 Pins', type: 'pins', amount: 5 },
@@ -33,12 +97,47 @@ const GOLD = C.gold;
 
 export default function DailyRewardScreen() {
   const { showToast } = useToast();
+  
+  // États de persistance des cadeaux/partages
+  const [lastClaimDate, setLastClaimDate] = useState<dayjs.Dayjs | null>(null);
+  const [lastProfileSharedAt, setLastProfileSharedAt] = useState<dayjs.Dayjs | null>(null);
+  const [lastAppSharedAt, setLastAppSharedAt] = useState<dayjs.Dayjs | null>(null);
+
+  // Helper pour savoir si 7 jours sont passés
+  const isWeekCooldown = (date: dayjs.Dayjs | null) => {
+    if (!date) return false;
+    const now = dayjs();
+    const diff = now.diff(date, 'day');
+    return diff < 7;
+  };
+
+  // Helper pour savoir si 1 jour est passé
+  const isDayCooldown = (date: dayjs.Dayjs | null) => {
+    if (!date) return false;
+    const now = dayjs();
+    const diff = now.diff(date, 'day');
+    return diff < 1;
+  };
+
+  const isDailyRewardClaimed = useMemo(() => {
+    if (!lastClaimDate) return false;
+    return dayjs().isSame(lastClaimDate, 'day');
+  }, [lastClaimDate]);
+
+  const { alert } = useDialog();
   const params = useLocalSearchParams();
+  const returnTo = typeof params.returnTo === 'string' ? params.returnTo : null;
   const [, tarSetClaiming] = useState(false);
   const [streak, setStreak] = useState(0);
-  const [lastClaimDate, setLastClaimDate] = useState<dayjs.Dayjs | null>(null);
   
   const [isDirectStoreAccess, setIsDirectStoreAccess] = useState(!!(params.tab || params.openStore));
+
+  // Redirection automatique si le cadeau est déjà récupéré et qu'on n'est pas en accès direct store
+  useEffect(() => {
+    if (!isDirectStoreAccess && isDailyRewardClaimed) {
+        router.replace('/(tabs)/profile');
+    }
+  }, [isDirectStoreAccess, isDailyRewardClaimed]);
 
   useEffect(() => {
     if (params.tab || params.openStore) {
@@ -55,16 +154,28 @@ export default function DailyRewardScreen() {
 
   useEffect(() => {
     const uid = auth.currentUser?.uid;
-    if (!uid) return;
+    if (!uid) {
+        setUserCoins(0);
+        setStreak(0);
+        setLastClaimDate(null);
+        return;
+    }
 
-    let hasPrivatePins = false;
+    // Reset for new user
+    setUserCoins(0);
+    setStreak(0);
+    setLastClaimDate(null);
+
+    const sourceOfTruth = {
+        pins: false
+    };
 
     const unsubPrivate = onSnapshot(userPrivateRef(uid), (docSnap) => {
         if (docSnap.exists()) {
             const d = docSnap.data();
             if (typeof d.pins === 'number') {
                 setUserCoins(d.pins);
-                hasPrivatePins = true;
+                sourceOfTruth.pins = true;
             }
         }
     });
@@ -74,7 +185,7 @@ export default function DailyRewardScreen() {
         const d = docSnap.data();
         
         // Fallback to public pins if not yet found in private
-        if (!hasPrivatePins && typeof d.pins === 'number') {
+        if (!sourceOfTruth.pins && typeof d.pins === 'number') {
             setUserCoins(d.pins);
         }
 
@@ -123,7 +234,7 @@ export default function DailyRewardScreen() {
         unsubPublic();
         unsubPrivate();
     };
-  }, []);
+  }, [auth.currentUser?.uid]);
 
   const isClaimable = () => {
     if (!lastClaimDate) return true;
@@ -134,6 +245,8 @@ export default function DailyRewardScreen() {
   const getNextDay = () => {
     return (streak % 7) + 1;
   };
+
+  const shouldShowStoreOnly = isDirectStoreAccess || !isClaimable();
 
   const claimReward = async (dayToClaim: number) => {
     if (claiming) return;
@@ -168,6 +281,12 @@ export default function DailyRewardScreen() {
     if (rewardDef) {
       showToast('Cadeau récupéré !', `Vous avez reçu : ${rewardDef.label}`, 'success');
     }
+
+    // On attend un court instant avant de rediriger pour que l'utilisateur voit le succès
+    setTimeout(() => {
+        handleClose();
+    }, 1200);
+
     try {
       const uid = auth.currentUser?.uid;
       if (!uid) return;
@@ -185,19 +304,18 @@ export default function DailyRewardScreen() {
           }
       }
     } catch (e: any) {
-      // Rollback si échec
-      setStreak(prev.streak);
-      setLastClaimDate(prev.lastClaimDate);
-      setUserCoins(prev.userCoins);
-      Alert.alert('Erreur', e.message || "Impossible de récupérer la récompense.");
+      // Rollback si échec (mais on ne redirige pas forcément en arrière car c'est perturbant)
+      console.error("Claim failed", e);
     } finally {
       setClaiming(false);
     }
   };
 
-  const shouldShowStoreOnly = isDirectStoreAccess || !isClaimable();
-
   const handleClose = () => {
+    if (returnTo) {
+        router.replace(returnTo as any);
+        return;
+    }
     // Si on vient de params.tab (accès direct Store), on retourne au profil
     if (isDirectStoreAccess) {
         if (router.canGoBack()) router.back();
@@ -210,6 +328,8 @@ export default function DailyRewardScreen() {
     router.replace('/(tabs)/profile');
   };
 
+  const closeLabel = returnTo === '/(tabs)/home' ? "Retour a l'accueil" : 'Retour au profil';
+
   // If accessed directly via params (e.g. from Profile > Pins), render ONLY the store
   if (shouldShowStoreOnly) {
       return (
@@ -218,6 +338,7 @@ export default function DailyRewardScreen() {
             <StoreModalContent 
                 onClose={handleClose} 
                 initialTab={params.tab as any}
+                returnTo={returnTo ?? undefined}
                 onBalanceUpdate={setUserCoins}
             />
         </View>
@@ -347,7 +468,7 @@ export default function DailyRewardScreen() {
           {/* Footer Link */}
           <View style={{ marginTop: 30, alignItems: 'center' }}>
             <TouchableOpacity onPress={handleClose} style={{ padding: 15 }}>
-               <Text style={{ color: C.subtleText, textDecorationLine: 'underline', fontWeight: '500' }}>Retour au profil</Text>
+               <Text style={{ color: C.subtleText, textDecorationLine: 'underline', fontWeight: '500' }}>{closeLabel}</Text>
             </TouchableOpacity>
           </View>
 
@@ -358,6 +479,7 @@ export default function DailyRewardScreen() {
          <StoreModalContent 
             onClose={() => setShowStore(false)} 
             initialTab={params.tab as any} 
+            returnTo={returnTo ?? undefined}
             onBalanceUpdate={setUserCoins}
          />
       </Modal>
@@ -365,47 +487,153 @@ export default function DailyRewardScreen() {
   );
 }
 
-function StoreModalContent({ onClose, initialTab, onBalanceUpdate }: { onClose: () => void, initialTab?: 'subs' | 'coins', onBalanceUpdate?: (val: number) => void }) {
+function StoreModalContent({ onClose, initialTab, returnTo, onBalanceUpdate }: { onClose: () => void, initialTab?: 'subs' | 'coins', returnTo?: string, onBalanceUpdate?: (val: number) => void }) {
+  const { alert, confirm } = useDialog();
   const [tab, setTab] = useState<'subs' | 'coins'>(initialTab || 'subs');
+  const [selectedFeature, setSelectedFeature] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [userCoins, setUserCoins] = useState(0);
   const [packages, setPackages] = useState<PurchasesPackage[]>([]);
+  const [currentSubscription, setCurrentSubscription] = useState<'FREE' | 'PLUS' | 'PRO'>('FREE');
+  const [currentSubscriptionExpiryMs, setCurrentSubscriptionExpiryMs] = useState(0);
   const { showToast } = useToast();
 
+  const uid = auth.currentUser?.uid;
+
+  const hasActiveSubscription = useMemo(() => {
+    // Si on vient d'activer localement, on fait confiance à cette activation pendant 45s
+    const cached = uid ? lastActivationCache.get(uid) : null;
+    if (cached && Date.now() - cached.time < 45000) {
+        if (cached.tier !== 'FREE') return true;
+    }
+    
+    return currentSubscription !== 'FREE' && currentSubscriptionExpiryMs > Date.now();
+  }, [currentSubscription, currentSubscriptionExpiryMs, uid]);
+
+  const activeSubscriptionLabel = useMemo(() => {
+    if (hasActiveSubscription) {
+        const cached = uid ? lastActivationCache.get(uid) : null;
+        const tier = (cached && Date.now() - cached.time < 45000) 
+            ? cached.tier 
+            : currentSubscription;
+        
+        return `${tier} actif jusqu'au ${dayjs(currentSubscriptionExpiryMs).format('DD/MM/YYYY')}`;
+    }
+    return 'Aucun abonnement actif';
+  }, [hasActiveSubscription, currentSubscription, currentSubscriptionExpiryMs, uid]);
+
+  // États de persistance des cadeaux/partages
+  const [lastClaimDate, setLastClaimDate] = useState<dayjs.Dayjs | null>(null);
+  const [lastProfileSharedAt, setLastProfileSharedAt] = useState<dayjs.Dayjs | null>(null);
+  const [lastAppSharedAt, setLastAppSharedAt] = useState<dayjs.Dayjs | null>(null);
+
+  // Helper pour savoir si 7 jours sont passés
+  const isWeekCooldown = (date: dayjs.Dayjs | null) => {
+    if (!date) return false;
+    const now = dayjs();
+    const diff = now.diff(date, 'day');
+    return diff < 7;
+  };
+
+  // Helper pour savoir si 1 jour est passé
+  const isDayCooldown = (date: dayjs.Dayjs | null) => {
+    if (!date) return false;
+    const now = dayjs();
+    const diff = now.diff(date, 'day');
+    return diff < 1;
+  };
+
+  const isDailyRewardClaimed = useMemo(() => {
+    if (!lastClaimDate) return false;
+    return dayjs().isSame(lastClaimDate, 'day');
+  }, [lastClaimDate]);
+
+  const nextPeriodLabel = (planId: string, duration: string) => {
+    const t = `${planId} ${duration}`.toLowerCase();
+    if (t.includes('1m') || t.includes('1 mois') || t.includes('mois')) return 'le mois prochain';
+    if (t.includes('1y') || t.includes('1 an') || t.includes('an')) return "l'année prochaine";
+    return 'à la prochaine période de facturation';
+  };
+
   const handleDailyReward = () => {
+    // Si le cadeau est déjà récupéré, on ne redirige pas vers la page de cadeau
+    // mais on reste sur le store ou on ferme selon le besoin.
+    // Ici on force la fermeture car l'utilisateur a cliqué sur "Cadeau" alors qu'il est déjà pris.
+    if (isDailyRewardClaimed) {
+        showToast('Déjà récupéré', 'Revenez demain pour un nouveau cadeau !', 'info');
+        return;
+    }
+
     onClose(); // Ferme la modal Store
-    // Si on est déjà sur la page principale /store, pas besoin de push.
-    // Mais ici StoreModalContent est souvent utilisé dans DailyRewardScreen.
-    // Si on veut "revenir" à l'écran cadeau journalier (qui est le parent), il suffit de fermer la modal.
-    
-    // CAS 1: On est dans DailyRewardScreen et on a ouvert la modal Store
-    // -> onClose() suffit pour révéler le cadeau journalier en dessous.
-    
-    // CAS 2: On est venu directement sur la modal Store (via un lien profond ou autre)
-    // -> On veut aller sur l'écran DailyRewardScreen complet.
-    
+    // ... rest of logic
     setTimeout(() => {
-        // On force la navigation vers la route principale du store (qui EST l'écran cadeau)
-        // en resetant les params pour être sûr d'afficher le cadeau et pas juste le store
-        router.push({ pathname: '/store', params: { openStore: undefined, tab: undefined } });
+        router.push({ pathname: '/store', params: { openStore: undefined, tab: undefined, returnTo } });
     }, 100);
   };
 
   useEffect(() => {
     const uid = auth.currentUser?.uid;
-    if (!uid) return;
+    if (!uid) {
+      setUserCoins(0);
+      setCurrentSubscription('FREE');
+      setCurrentSubscriptionExpiryMs(0);
+      return;
+    }
 
-    // Listen to realtime updates for pins
-    let hasPrivatePins = false;
+    // Reset state for new user
+    setUserCoins(0);
+    setCurrentSubscription('FREE');
+    setCurrentSubscriptionExpiryMs(0);
+
+    // Listen to realtime updates for pins and subscription
+    // Using a single object to track which fields came from private doc to avoid public overwriting
+    const sourceOfTruth = {
+        pins: false,
+        subscription: false,
+        subscriptionExpiryMs: false,
+        lastProfileSharedAt: false,
+        lastAppSharedAt: false
+    };
     
     const unsubPrivate = onSnapshot(userPrivateRef(uid), (docSnap) => {
         if (docSnap.exists()) {
             const d = docSnap.data();
+            
             if (typeof d.pins === 'number') {
                 const val = d.pins;
                 setUserCoins(val);
                 if (onBalanceUpdate) onBalanceUpdate(val);
-                hasPrivatePins = true;
+                sourceOfTruth.pins = true;
+            }
+            
+            if (['FREE', 'PLUS', 'PRO'].includes(d.subscription)) {
+                // Prevent overwriting if we just activated a subscription locally
+                const cached = lastActivationCache.get(uid);
+                const isRecentlyActivated = cached && (Date.now() - cached.time < 30000);
+                
+                if (!isRecentlyActivated || d.subscription !== 'FREE') {
+                    setCurrentSubscription(d.subscription);
+                    sourceOfTruth.subscription = true;
+                }
+            }
+            
+            if (typeof d.subscriptionExpiryMs === 'number') {
+                const cached = lastActivationCache.get(uid);
+                const isRecentlyActivated = cached && (Date.now() - cached.time < 30000);
+                if (!isRecentlyActivated || d.subscriptionExpiryMs > 0) {
+                    setCurrentSubscriptionExpiryMs(d.subscriptionExpiryMs);
+                    sourceOfTruth.subscriptionExpiryMs = true;
+                }
+            }
+            
+            // Shared timestamps
+            if (d.lastProfileSharedAt) {
+                setLastProfileSharedAt(d.lastProfileSharedAt?.toMillis ? dayjs(d.lastProfileSharedAt.toMillis()) : dayjs(d.lastProfileSharedAt));
+                sourceOfTruth.lastProfileSharedAt = true;
+            }
+            if (d.lastAppSharedAt) {
+                setLastAppSharedAt(d.lastAppSharedAt?.toMillis ? dayjs(d.lastAppSharedAt.toMillis()) : dayjs(d.lastAppSharedAt));
+                sourceOfTruth.lastAppSharedAt = true;
             }
         }
     });
@@ -413,10 +641,36 @@ function StoreModalContent({ onClose, initialTab, onBalanceUpdate }: { onClose: 
     const unsubPublic = onSnapshot(userDocRef(uid), (docSnap) => {
         if (docSnap.exists()) {
             const d = docSnap.data();
-            if (!hasPrivatePins && typeof d.pins === 'number') {
+            
+            // Only use public data if private hasn't provided it yet (fallback/migration case)
+            if (!sourceOfTruth.pins && typeof d.pins === 'number') {
                 const val = d.pins;
                 setUserCoins(val);
                 if (onBalanceUpdate) onBalanceUpdate(val);
+            }
+            
+            if (!sourceOfTruth.subscription && ['FREE', 'PLUS', 'PRO'].includes(d.subscription)) {
+                const cached = lastActivationCache.get(uid);
+                const isRecentlyActivated = cached && (Date.now() - cached.time < 30000);
+                if (!isRecentlyActivated || d.subscription !== 'FREE') {
+                    setCurrentSubscription(d.subscription);
+                }
+            }
+            
+            if (!sourceOfTruth.subscriptionExpiryMs && typeof d.subscriptionExpiryMs === 'number') {
+                const cached = lastActivationCache.get(uid);
+                const isRecentlyActivated = cached && (Date.now() - cached.time < 30000);
+                if (!isRecentlyActivated || d.subscriptionExpiryMs > 0) {
+                    setCurrentSubscriptionExpiryMs(d.subscriptionExpiryMs);
+                }
+            }
+
+            // Daily Reward status is always in public doc
+            const rawLastClaim = (d as any).lastDailyRewardClaimedAt;
+            if (rawLastClaim) {
+                if (typeof rawLastClaim === 'number') setLastClaimDate(dayjs(rawLastClaim));
+                else if (typeof (rawLastClaim as any).toMillis === 'function') setLastClaimDate(dayjs(rawLastClaim.toMillis()));
+                else if (rawLastClaim instanceof Date) setLastClaimDate(dayjs(rawLastClaim));
             }
         }
     });
@@ -427,60 +681,192 @@ function StoreModalContent({ onClose, initialTab, onBalanceUpdate }: { onClose: 
         unsubPublic();
         unsubPrivate();
     };
-  }, [onBalanceUpdate]);
+  }, [auth.currentUser?.uid, onBalanceUpdate]);
 
   const initStore = async () => {
-    await initRevenueCat();
+    const uid = auth.currentUser?.uid;
+    await initRevenueCat(uid || undefined);
+    void syncRevenueCatPurchases({ maxAttempts: 1, baseDelayMs: 0 }).catch(() => null);
     const offerings = await getOfferings();
-    if (offerings && offerings.availablePackages) {
-      setPackages(offerings.availablePackages);
+    if (!offerings || !offerings.availablePackages) {
+      const msg =
+        getRevenueCatConfigError() ||
+        (isRevenueCatConfigured()
+          ? "Impossible de charger les offres d'abonnement pour le moment."
+          : "Achats indisponibles: RevenueCat n'est pas configuré dans cette build.");
+      showToast('Achats indisponibles', msg, 'error');
+      return;
     }
+    setPackages(offerings.availablePackages);
   };
 
   const findPackage = (identifier: string) => {
-    return packages.find(p => p.identifier === identifier || p.product.identifier === identifier);
+    const wanted = String(identifier || '').trim().toLowerCase();
+    if (!wanted) return undefined;
+    return packages.find((p) => {
+      const packId = String(p.identifier || '').trim().toLowerCase();
+      const productId = String(p.product?.identifier || '').trim().toLowerCase();
+      return (
+        packId === wanted ||
+        productId === wanted ||
+        packId.endsWith(`.${wanted}`) ||
+        productId.endsWith(`.${wanted}`) ||
+        packId.endsWith(wanted) ||
+        productId.endsWith(wanted)
+      );
+    });
   };
 
-  const handlePurchaseSub = async (tier: string, planId: string, duration: string) => {
-    setLoading(true);
-    try {
+  const handlePurchaseSub = async (tier: 'PLUS' | 'PRO', planId: string, duration: string) => {
+    if (loading) return;
+
+    if (hasActiveSubscription && currentSubscription === tier) {
+      alert('Abonnement déjà actif', `Votre abonnement ${tier} est déjà actif.`);
+      return;
+    }
+
+    const executePurchase = async () => {
+      setLoading(true);
+      try {
         const uid = auth.currentUser?.uid;
         if (!uid) return;
 
         const pack = findPackage(planId);
-        // Mocking real purchase for now if pack not found
-        const success = pack ? await purchasePackage(pack) : true;
-        
-        if (success) {
-            const processPurchaseFn = httpsCallable(functions, 'processPurchase');
-            await processPurchaseFn({ type: 'subscription', itemId: planId });
-            
-            Alert.alert('Félicitations !', `Vous êtes maintenant abonné à ${tier} (${duration}).`);
+        if (!pack) {
+          alert('Produit introuvable', "Impossible de charger ce produit. Vérifie les produits App Store Connect et RevenueCat (identifiants).");
+          return;
         }
-    } catch (e: any) {
-        Alert.alert('Erreur', e.message || "L'achat a échoué.");
-    } finally {
+
+        const result = await purchasePackage(pack);
+        if (!result) return;
+
         setLoading(false);
+
+        // Activation immédiate basée sur le retour de RevenueCat
+        const entitlements = result.customerInfo.entitlements.active;
+        let detectedTier: SubscriptionTier = 'FREE';
+        let detectedExpiry = 0;
+
+        // Détection plus robuste des entitlements (insensible à la casse et partielle)
+        for (const [entId, e] of Object.entries(entitlements)) {
+            const normalizedId = entId.toLowerCase();
+            const exp = e.expirationDate ? new Date(e.expirationDate).getTime() : 0;
+            
+            // Un entitlement est valide s'il n'a pas de date d'expiration (lifetime) ou si elle est dans le futur
+            const isActive = !e.expirationDate || exp > Date.now();
+            if (!isActive) continue;
+
+            if (normalizedId.includes('pro') || normalizedId.includes('premium')) {
+                detectedTier = 'PRO';
+                detectedExpiry = exp;
+                break; // PRO est le plus haut niveau
+            } else if (normalizedId.includes('plus')) {
+                if (detectedTier !== 'PRO') {
+                    detectedTier = 'PLUS';
+                    detectedExpiry = exp;
+                }
+            }
+        }
+
+        const isMatched = (detectedTier === tier);
+        const isUpgraded = (tier === 'PLUS' && detectedTier === 'PRO');
+
+        if (isMatched || isUpgraded) {
+          if (uid) lastActivationCache.set(uid, { tier: detectedTier, time: Date.now() });
+          setCurrentSubscription(detectedTier);
+          if (detectedExpiry) setCurrentSubscriptionExpiryMs(detectedExpiry);
+          alert('Succès', `Félicitations ! Votre abonnement ${detectedTier} est maintenant actif.`);
+          
+          // On lance la synchro en arrière-plan sans bloquer
+          void syncRevenueCatPurchases({ 
+            maxAttempts: 5, 
+            baseDelayMs: 2000,
+            waitForTier: tier 
+          }).catch(() => null);
+          return;
+        }
+
+        // Si RevenueCat ne l'affiche pas encore dans customerInfo, on tente une synchro forcée mais plus longue
+        showToast('Achat confirmé', "Activation de votre abonnement…", 'info');
+        
+        const r: any = await syncRevenueCatPurchases({ 
+          maxAttempts: 6, // Un peu plus de tentatives pour être sûr
+          baseDelayMs: 2000,
+          waitForTier: tier 
+        }).catch(() => null);
+
+        const nextTier = r?.data?.subscription?.tier;
+        const nextExpiry = r?.data?.subscription?.expiryMs;
+        
+        if (nextTier === 'PLUS' || nextTier === 'PRO') {
+          if (uid) lastActivationCache.set(uid, { tier: nextTier, time: Date.now() });
+          setCurrentSubscription(nextTier);
+        } else if (nextTier === 'FREE') {
+          // NE PAS écraser par FREE si on vient d'acheter (cache de 60s)
+          const cached = uid ? lastActivationCache.get(uid) : null;
+          const isRecentlyActivated = cached && (Date.now() - cached.time < 60000);
+          if (!isRecentlyActivated) {
+            setCurrentSubscription(nextTier);
+          }
+        }
+        if (typeof nextExpiry === 'number') {
+          setCurrentSubscriptionExpiryMs(nextExpiry);
+        }
+
+        if (nextTier === tier || (tier === 'PLUS' && nextTier === 'PRO')) {
+          alert('Succès', `Félicitations ! Votre abonnement ${nextTier} est maintenant actif.`);
+          return;
+        }
+
+        // Si après les tentatives c'est toujours pas à jour, on informe mais sans bloquer l'usage
+        showToast('Activation différée', "Votre achat est confirmé. L'activation peut prendre quelques minutes.", 'warning');
+      } catch (e: any) {
+        alert('Erreur', e.message || "L'achat a échoué.");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    if (hasActiveSubscription && currentSubscriptionExpiryMs > Date.now()) {
+      const when = nextPeriodLabel(planId, duration);
+      confirm(
+        'Changer d’abonnement',
+        `Votre abonnement ${currentSubscription} est actif jusqu'au ${dayjs(currentSubscriptionExpiryMs).format('DD/MM/YYYY')}.\n\nVoulez-vous passer à ${tier} ${when} ?`,
+        () => { void executePurchase(); }
+      );
+      return;
     }
+
+    await executePurchase();
   };
 
   const handlePurchasePins = async (amount: number, packId: string, price: string) => {
+    if (loading) return;
     setLoading(true);
     try {
         const uid = auth.currentUser?.uid;
         if (!uid) return;
 
         const pack = findPackage(packId);
-        const success = pack ? !!(await purchasePackage(pack)) : true; // Fallback test/dev: traiter comme succès
-
-        if (success) {
-             const processPurchaseFn = httpsCallable(functions, 'processPurchase');
-             await processPurchaseFn({ type: 'pins', itemId: packId });
-             
-             showToast('Succès', `${amount} pins ajoutés !`, 'success');
-        } else {
-             // Cancelled or failed
+        if (!pack) {
+            showToast('Produit introuvable', "Impossible de charger ce produit. Vérifie les produits App Store Connect et RevenueCat (identifiants).", 'error');
+            return;
         }
+
+        const success = await purchasePackage(pack);
+        if (!success) return;
+
+        setLoading(false);
+
+        const r: any = await syncRevenueCatPurchases({ maxAttempts: 1, baseDelayMs: 0 }).catch(() => null);
+        const granted = typeof r?.data?.grantedPins === 'number' ? r.data.grantedPins : null;
+        if (typeof granted === 'number') {
+          showToast('Succès', `${granted} pins ajoutés !`, 'success');
+          return;
+        }
+
+        showToast('Achat confirmé', 'Ajout des pins en cours…', 'info');
+        void syncRevenueCatPurchases({ maxAttempts: 3, baseDelayMs: 800 }).catch(() => null);
     } catch (e: any) {
         showToast('Erreur', e.message || "L'achat a échoué.", 'error');
     } finally {
@@ -489,29 +875,78 @@ function StoreModalContent({ onClose, initialTab, onBalanceUpdate }: { onClose: 
   };
 
   const handleRestore = async () => {
+    if (loading) return;
     setLoading(true);
     try {
       const info = await restorePurchases();
-      if (info?.entitlements.active) {
-         Alert.alert('Succès', 'Vos achats ont été restaurés.');
-         // TODO: Sync with your backend if needed
-      } else {
-         Alert.alert('Info', 'Aucun achat actif trouvé à restaurer.');
+      setLoading(false);
+
+      if (info) {
+        const entitlements = info.entitlements.active;
+        let detectedTier: SubscriptionTier = 'FREE';
+        let detectedExpiry = 0;
+
+        for (const [entId, e] of Object.entries(entitlements)) {
+            const normalizedId = entId.toLowerCase();
+            const exp = e.expirationDate ? new Date(e.expirationDate).getTime() : 0;
+            
+            // Un entitlement est valide s'il n'a pas de date d'expiration (lifetime) ou si elle est dans le futur
+            const isActive = !e.expirationDate || exp > Date.now();
+            if (!isActive) continue;
+
+            if (normalizedId.includes('pro') || normalizedId.includes('premium')) {
+                detectedTier = 'PRO';
+                detectedExpiry = exp;
+                break;
+            } else if (normalizedId.includes('plus')) {
+                if (detectedTier !== 'PRO') {
+                    detectedTier = 'PLUS';
+                    detectedExpiry = exp;
+                }
+            }
+        }
+
+        if (detectedTier !== 'FREE') {
+            if (uid) lastActivationCache.set(uid, { tier: detectedTier, time: Date.now() });
+            setCurrentSubscription(detectedTier);
+            if (detectedExpiry) setCurrentSubscriptionExpiryMs(detectedExpiry);
+            alert('Succès', `Vos achats ont été restaurés. Abonnement ${detectedTier} actif.`);
+            // Synchro backend en arrière-plan
+            void syncRevenueCatPurchases({ maxAttempts: 5, baseDelayMs: 2000 }).catch(() => null);
+            return;
+        }
       }
+
+      const r: any = await syncRevenueCatPurchases({ maxAttempts: 5, baseDelayMs: 2000 }).catch(() => null);
+      const hasActive = !!info?.entitlements?.active && Object.keys(info.entitlements.active || {}).length > 0;
+      const tier = r?.data?.subscription?.tier;
+      if (tier === 'PLUS' || tier === 'PRO') {
+        if (uid) lastActivationCache.set(uid, { tier, time: Date.now() });
+        setCurrentSubscription(tier);
+        alert('Succès', `Vos achats ont été restaurés. Abonnement ${tier} actif.`);
+        return;
+      }
+      if (hasActive) {
+        alert('Restauré', "Achats restaurés. Synchronisation en cours…");
+      } else {
+        alert('Info', 'Aucun achat actif trouvé à restaurer.');
+      }
+      void syncRevenueCatPurchases({ maxAttempts: 5, baseDelayMs: 1500 }).catch(() => null);
     } catch (e: any) {
-      Alert.alert('Erreur', e.message);
+      alert('Erreur', e.message);
     } finally {
       setLoading(false);
     }
   };
 
   const confirmPurchase = async (itemType: string, cost: number) => {
+      if (loading) return;
       if (userCoins < cost) {
-          Alert.alert('Pins insuffisants', 'Vous n\'avez pas assez de pins. Rechargez votre compte !');
+          alert('Pins insuffisants', 'Vous n\'avez pas assez de pins. Rechargez votre compte !');
           return;
       }
       
-      Alert.alert(
+      alert(
           'Confirmer l\'achat',
           `Voulez-vous dépenser ${cost} Pins pour cet article ?`,
           [
@@ -521,18 +956,9 @@ function StoreModalContent({ onClose, initialTab, onBalanceUpdate }: { onClose: 
                   onPress: async () => {
                       setLoading(true);
                       try {
-                          const processPurchaseFn = httpsCallable(functions, 'processPurchase');
-                          // On utilise un type spécial 'spend_pins' ou on adapte processPurchase pour gérer les dépenses côté serveur
-                          // MAIS pour l'instant, le client gère la dépense via performActionUpdates ou similaire ?
-                          // NON, processPurchase sert à créditer.
-                          // Pour dépenser, on doit appeler une fonction qui décrémente et ajoute l'item.
-                          
-                          // TODO: Créer une fonction Cloud 'buyItemWithPins' pour sécuriser ça.
-                          // Pour l'instant, on simule en local ou on appelle une fonction générique.
-                          
-                          // Solution rapide : on appelle une nouvelle fonction buyItem
+                          const requestId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
                           const buyItemFn = httpsCallable(functions, 'buyItemWithPins');
-                          await buyItemFn({ itemType, cost });
+                          await buyItemFn({ itemType, requestId });
                           
                           showToast('Succès', 'Article acheté !', 'success');
                       } catch (e: any) {
@@ -575,6 +1001,15 @@ function StoreModalContent({ onClose, initialTab, onBalanceUpdate }: { onClose: 
         <ScrollView contentContainerStyle={{ padding: 20 }}>
           {tab === 'subs' ? (
             <View style={{ gap: 20 }}>
+              <View style={{ backgroundColor: C.card, borderRadius: 18, padding: 16, borderWidth: 1, borderColor: hasActiveSubscription ? GOLD : C.panelBorder }}>
+                <Text style={{ color: C.muted, fontSize: 12, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Etat actuel</Text>
+                <Text style={{ color: hasActiveSubscription ? GOLD : C.text, fontSize: 16, fontWeight: '800' }}>{activeSubscriptionLabel}</Text>
+                <Text style={{ color: C.subtleText, fontSize: 13, marginTop: 6 }}>
+                  {hasActiveSubscription
+                    ? "Vous pouvez changer d'abonnement: le nouveau plan s'appliquera à la prochaine période de facturation."
+                    : 'Choisissez un abonnement premium à activer.'}
+                </Text>
+              </View>
               
               {/* Frensy Plus */}
               <View style={{ backgroundColor: C.card, borderRadius: 20, overflow: 'hidden', borderWidth: 1, borderColor: C.panelBorder }}>
@@ -591,6 +1026,7 @@ function StoreModalContent({ onClose, initialTab, onBalanceUpdate }: { onClose: 
                     <View style={{ gap: 12, marginBottom: 25 }}>
                         <FeatureRow text="3 Invitations / jour" />
                         <FeatureRow text="Filtres âge & intérêts précis" />
+                        <FeatureRow text="Créer 1 groupe Discover / mois pour discuter" />
                         <FeatureRow text="1 Boost / semaine" />
                         <FeatureRow text="3 Undo / jour" />
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 5 }}>
@@ -612,23 +1048,28 @@ function StoreModalContent({ onClose, initialTab, onBalanceUpdate }: { onClose: 
                                 key={p.id}
                                 onPress={() => handlePurchaseSub('PLUS', p.id, p.label)}
                                 activeOpacity={0.8}
+                                disabled={loading}
                                 style={{ 
                                     flexDirection: 'row', 
                                     justifyContent: 'space-between', 
                                     backgroundColor: 'rgba(255,255,255,0.05)', 
-                                    padding: 18, 
-                                    borderRadius: 16, 
+                                    padding: 14, 
+                                    borderRadius: 14, 
                                     alignItems: 'center',
                                     borderWidth: 1,
-                                    borderColor: 'rgba(255,255,255,0.05)'
+                                    borderColor: hasActiveSubscription && currentSubscription === 'PLUS' ? C.tint : 'rgba(255,255,255,0.05)',
+                                    opacity: loading ? 0.55 : 1
                                 }}
                             >
                                 <View>
-                                    <Text style={{ color: C.text, fontWeight: '700', fontSize: 16 }}>{p.label}</Text>
-                                    {p.savings && <Text style={{ color: C.success, fontSize: 12, fontWeight: '600', marginTop: 2 }}>Eco {p.savings}</Text>}
+                                    <Text style={{ color: C.text, fontWeight: '700', fontSize: 15 }}>{p.label}</Text>
+                                    {p.savings && <Text style={{ color: C.success, fontSize: 11, fontWeight: '600', marginTop: 1 }}>Eco {p.savings}</Text>}
+                                    {hasActiveSubscription && currentSubscription === 'PLUS' && (
+                                      <Text style={{ color: C.tint, fontSize: 11, fontWeight: '700', marginTop: 3 }}>Abonnement actif</Text>
+                                    )}
                                 </View>
                                 <View style={{ alignItems: 'flex-end' }}>
-                                    <Text style={{ color: C.text, fontSize: 18, fontWeight: 'bold' }}>{p.price} €</Text>
+                                    <Text style={{ color: C.text, fontSize: 16, fontWeight: 'bold' }}>{p.price} € / {p.durationMonths === 1 ? 'mois' : 'an'}</Text>
                                 </View>
                             </TouchableOpacity>
                         ))}
@@ -649,7 +1090,8 @@ function StoreModalContent({ onClose, initialTab, onBalanceUpdate }: { onClose: 
                     <View style={{ gap: 12, marginBottom: 25 }}>
                         <FeatureRow text="Invitations illimitées" gold />
                         <FeatureRow text="Filtres âge & intérêts précis" gold />
-                        <FeatureRow text="Voir qui t&apos;a liké (photos)" gold />
+                        <FeatureRow text="Créer des groupes Discover illimités pour discuter" gold />
+                        <FeatureRow text="Voir les profils interesses (photos)" gold />
                         <FeatureRow text="Undo illimité" gold />
                         <FeatureRow text="3 Boosts / semaine" />
                         <FeatureRow text="3 Super Invites / semaine" />
@@ -673,40 +1115,139 @@ function StoreModalContent({ onClose, initialTab, onBalanceUpdate }: { onClose: 
                                 key={p.id}
                                 onPress={() => handlePurchaseSub('PRO', p.id, p.label)}
                                 activeOpacity={0.8}
+                                disabled={loading}
                                 style={{ 
                                     flexDirection: 'row', 
                                     justifyContent: 'space-between', 
                                     backgroundColor: GOLD, 
-                                    padding: 18, 
-                                    borderRadius: 16, 
+                                    padding: 14, 
+                                    borderRadius: 14, 
                                     alignItems: 'center',
                                     shadowColor: GOLD,
                                     shadowOffset: { width: 0, height: 4 },
                                     shadowOpacity: 0.2,
                                     shadowRadius: 8,
-                                    elevation: 4
+                                    elevation: 4,
+                                    opacity: loading ? 0.55 : 1
                                 }}
                             >
                                 <View>
-                                    <Text style={{ color: '#000', fontWeight: '800', fontSize: 16 }}>{p.label}</Text>
-                                    {p.savings && <Text style={{ color: '#000', fontSize: 12, fontWeight: '700', marginTop: 2 }}>Eco {p.savings}</Text>}
+                                    <Text style={{ color: '#000', fontWeight: '800', fontSize: 15 }}>{p.label}</Text>
+                                    {p.savings && <Text style={{ color: '#000', fontSize: 11, fontWeight: '700', marginTop: 1 }}>Eco {p.savings}</Text>}
+                                    {hasActiveSubscription && currentSubscription === 'PRO' && (
+                                      <Text style={{ color: '#000', fontSize: 11, fontWeight: '800', marginTop: 3 }}>Abonnement actif</Text>
+                                    )}
                                 </View>
-                                <Text style={{ color: '#000', fontSize: 20, fontWeight: '900' }}>{p.price} €</Text>
+                                <Text style={{ color: '#000', fontSize: 18, fontWeight: '900' }}>{p.price} € / {p.durationMonths === 1 ? 'mois' : 'an'}</Text>
                             </TouchableOpacity>
                         ))}
                     </View>
                  </LinearGradient>
               </View>
 
+              <View style={{ backgroundColor: C.card, borderRadius: 16, padding: 16, borderWidth: 1, borderColor: C.panelBorder, gap: 10 }}>
+                <Text style={{ color: C.muted, fontSize: 12, fontWeight: '700', textTransform: 'uppercase' }}>Abonnements automatiques</Text>
+                <Text style={{ color: C.subtleText, fontSize: 13, lineHeight: 20 }}>
+                  Frensy PLUS et Frensy PRO sont des abonnements à renouvellement automatique pour la durée affichée sur chaque offre (1 mois ou 1 an). Le prix facturé est celui indiqué sur le bouton. Le renouvellement peut être géré ou résilié dans les réglages du compte Apple (abonnements).
+                </Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 16, marginTop: 4 }}>
+                  <TouchableOpacity onPress={() => { void Linking.openURL(TERMS_URL); }}>
+                    <Text style={{ color: C.tint, fontSize: 13, fontWeight: '700', textDecorationLine: 'underline' }}>Conditions d&apos;utilisation (EULA)</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => { void Linking.openURL(privacyPolicyUrl()); }}>
+                    <Text style={{ color: C.tint, fontSize: 13, fontWeight: '700', textDecorationLine: 'underline' }}>Politique de confidentialité</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+
             </View>
           ) : (
             <View style={{ gap: 30 }}>
                 {/* Solde */}
-                        <View style={{ alignItems: 'center', marginVertical: 10 }}>
+                <View style={{ alignItems: 'center', marginVertical: 10 }}>
                     <Text style={{ color: C.muted, fontSize: 14, marginBottom: 5 }}>MON SOLDE</Text>
                     <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                         <Image source={PINS_IMG} style={{ width: 32, height: 32, marginRight: 8 }} resizeMode="contain" />
                         <Text style={{ color: C.text, fontSize: 36, fontWeight: 'bold' }}>{userCoins}</Text>
+                    </View>
+                </View>
+
+                {/* Section 0: Gagner des Pins (Nouveau) */}
+                <View>
+                    <Text style={{ color: C.text, fontSize: 18, fontWeight: 'bold', marginBottom: 15 }}>Gagner des Pins gratuitement</Text>
+                    <View style={{ backgroundColor: C.card, borderRadius: 12, overflow: 'hidden' }}>
+                        <EarnRow 
+                            label="Partager mon profil" 
+                            sub="Invitez vos amis à vous rejoindre"
+                            reward="10"
+                            icon="👤"
+                            completed={isWeekCooldown(lastProfileSharedAt)}
+                            completedLabel="Fait"
+                            onPress={async () => {
+                                if (isWeekCooldown(lastProfileSharedAt)) {
+                                    showToast('Déjà fait', 'Revenez la semaine prochaine !', 'info');
+                                    return;
+                                }
+                                const uid = auth.currentUser?.uid;
+                                if (!uid) return;
+                                try {
+                                    await Share.share({
+                                        message: `Rejoins-moi sur Frensy ! Voici mon profil : https://frensy.app/user/${uid}`,
+                                    });
+                                    const requestId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+                                    const claimFn = httpsCallable(functions, 'claimEarnPins');
+                                    const r: any = await claimFn({ type: 'share_profile', requestId });
+                                    const granted = typeof r?.data?.grantedPins === 'number' ? r.data.grantedPins : 10;
+                                    showToast('Succès', `${granted} Pins ajoutés !`, 'success');
+                                } catch (error) {
+                                    console.error(error);
+                                }
+                            }}
+                        />
+                         <EarnRow 
+                            label="Partager l'application" 
+                            sub="Faites connaître Frensy"
+                            reward="5"
+                            icon="📱"
+                            completed={isDayCooldown(lastAppSharedAt)}
+                            completedLabel="Fait"
+                            onPress={async () => {
+                                if (isDayCooldown(lastAppSharedAt)) {
+                                    showToast('Déjà fait', 'Revenez demain !', 'info');
+                                    return;
+                                }
+                                const uid = auth.currentUser?.uid;
+                                if (!uid) return;
+                                try {
+                                    await Share.share({
+                                        message: `Découvre Frensy, l'app pour se faire des potes ! https://frensy.app`,
+                                    });
+                                    const requestId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+                                    const claimFn = httpsCallable(functions, 'claimEarnPins');
+                                    const r: any = await claimFn({ type: 'share_app', requestId });
+                                    const granted = typeof r?.data?.grantedPins === 'number' ? r.data.grantedPins : 5;
+                                    showToast('Succès', `${granted} Pins ajoutés !`, 'success');
+                                } catch (error) {
+                                    console.error(error);
+                                }
+                            }}
+                        />
+                         <EarnRow 
+                            label="Créer une vidéo TikTok/Reels" 
+                            sub="Gagnez jusqu'à 500 Pins !"
+                            reward="500+"
+                            icon="🎥"
+                            onPress={() => {
+                                alert(
+                                    'Créateur de contenu',
+                                    'Fais une vidéo sur Frensy (TikTok, Insta, YouTube) et envoie-nous le lien pour recevoir tes Pins !',
+                                    [
+                                        { text: 'Annuler', style: 'cancel' },
+                                        { text: 'Envoyer le lien', onPress: () => Linking.openURL('mailto:support@frensy.app?subject=Ma vidéo Frensy&body=Voici le lien de ma vidéo : ') }
+                                    ]
+                                );
+                            }}
+                        />
                     </View>
                 </View>
 
@@ -716,20 +1257,23 @@ function StoreModalContent({ onClose, initialTab, onBalanceUpdate }: { onClose: 
                         <Text style={{ color: C.text, fontSize: 18, fontWeight: 'bold' }}>Recharger mes Pins</Text>
                         <TouchableOpacity 
                             onPress={handleDailyReward}
+                            disabled={isDailyRewardClaimed}
                             style={{ 
-                                backgroundColor: 'rgba(255, 215, 0, 0.1)', 
+                                backgroundColor: isDailyRewardClaimed ? 'rgba(255, 255, 255, 0.1)' : 'rgba(255, 215, 0, 0.1)', 
                                 paddingHorizontal: 12, 
                                 paddingVertical: 6, 
                                 borderRadius: 20, 
                                 borderWidth: 1, 
-                                borderColor: GOLD,
+                                borderColor: isDailyRewardClaimed ? 'rgba(255, 255, 255, 0.2)' : GOLD,
                                 flexDirection: 'row',
                                 alignItems: 'center',
                                 gap: 6
                             }}
                         >
-                            <Text style={{ fontSize: 12 }}>🎁</Text>
-                            <Text style={{ color: GOLD, fontSize: 12, fontWeight: 'bold' }}>Cadeau</Text>
+                            <Text style={{ fontSize: 12 }}>{isDailyRewardClaimed ? '✅' : '🎁'}</Text>
+                            <Text style={{ color: isDailyRewardClaimed ? C.subtleText : GOLD, fontSize: 12, fontWeight: 'bold' }}>
+                                {isDailyRewardClaimed ? 'Cadeau récupéré' : 'Cadeau'}
+                            </Text>
                         </TouchableOpacity>
                     </View>
                     <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
@@ -789,93 +1333,48 @@ function StoreModalContent({ onClose, initialTab, onBalanceUpdate }: { onClose: 
                 </View>
 
                 {/* Utiliser mes Pins */}
-                <View style={{ backgroundColor: C.card, borderRadius: 16, padding: 20, borderWidth: 1, borderColor: C.panelBorder, marginTop: 30 }}>
-                     <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 20 }}>
+                <View style={{ marginTop: 30 }}>
+                     <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 15 }}>
                          <Text style={{ fontSize: 18, fontWeight: 'bold', color: C.text, flex: 1 }}>Utiliser mes Pins</Text>
-                         <View style={{ backgroundColor: C.panel, padding: 6, borderRadius: 8 }}>
-                             <Image source={PINS_IMG} style={{ width: 16, height: 16 }} resizeMode="contain" />
-                         </View>
                      </View>
-                    <View style={{ gap: 12 }}>
-                        <PriceRow 
-                            label="Booster mon profil (10 min)" 
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingRight: 20, gap: 12 }}>
+                        <PriceCard 
+                            label="Booster mon profil" 
                             cost={FEATURE_COSTS.BOOST} 
                             icon="🚀" 
-                            onPress={() => {
-                                Alert.alert(
-                                    'Booster mon profil', 
-                                    'Choisissez un pack :',
-                                    [
-                                        { text: 'Annuler', style: 'cancel' },
-                                        { text: `1 Boost (${FEATURE_COSTS.BOOST} Pins)`, onPress: () => confirmPurchase('BOOST', FEATURE_COSTS.BOOST) },
-                                        { text: `5 Boosts (${FEATURE_COSTS.BOOST_BUNDLE_5} Pins)`, onPress: () => confirmPurchase('BOOST_BUNDLE_5', FEATURE_COSTS.BOOST_BUNDLE_5) },
-                                    ]
-                                );
-                            }}
+                            onPress={() => setSelectedFeature('BOOST')}
                         />
-                        <PriceRow 
+                        <PriceCard 
                             label="Super Invite" 
                             cost={FEATURE_COSTS.SUPER_INVITE} 
                             icon="💌" 
-                            onPress={() => {
-                                Alert.alert(
-                                    'Super Invite', 
-                                    'Choisissez un pack :',
-                                    [
-                                        { text: 'Annuler', style: 'cancel' },
-                                        { text: `1 Super Invite (${FEATURE_COSTS.SUPER_INVITE} Pins)`, onPress: () => confirmPurchase('SUPER_INVITE', FEATURE_COSTS.SUPER_INVITE) },
-                                        { text: `5 Super Invites (${FEATURE_COSTS.SUPER_INVITE_BUNDLE_5} Pins)`, onPress: () => confirmPurchase('SUPER_INVITE_BUNDLE_5', FEATURE_COSTS.SUPER_INVITE_BUNDLE_5) },
-                                        { text: `15 Super Invites (${FEATURE_COSTS.SUPER_INVITE_BUNDLE_15} Pins)`, onPress: () => confirmPurchase('SUPER_INVITE_BUNDLE_15', FEATURE_COSTS.SUPER_INVITE_BUNDLE_15) },
-                                    ]
-                                );
-                            }}
+                            onPress={() => setSelectedFeature('SUPER_INVITE')}
                         />
-                        <PriceRow 
-                            label="Révéler un like" 
+                        <PriceCard 
+                            label="Reveler un interet" 
                             cost={FEATURE_COSTS.UNLOCK_LIKE} 
                             icon="👁️" 
-                            onPress={() => {
-                                Alert.alert(
-                                    'Révéler un like', 
-                                    'Choisissez un pack :',
-                                    [
-                                        { text: 'Annuler', style: 'cancel' },
-                                        { text: `1 Révélation (${FEATURE_COSTS.UNLOCK_LIKE} Pins)`, onPress: () => confirmPurchase('UNLOCK_LIKE', FEATURE_COSTS.UNLOCK_LIKE) },
-                                        { text: `10 Révélations (${FEATURE_COSTS.UNLOCK_LIKE_BUNDLE_10} Pins)`, onPress: () => confirmPurchase('UNLOCK_LIKE_BUNDLE_10', FEATURE_COSTS.UNLOCK_LIKE_BUNDLE_10) },
-                                    ]
-                                );
-                            }}
+                            onPress={() => setSelectedFeature('UNLOCK_LIKE')}
                         />
-                        <PriceRow 
+                        <PriceCard 
+                            label="Invitation"
+                            cost={FEATURE_COSTS.INVITE}
+                            icon="✉️"
+                            onPress={() => setSelectedFeature('INVITE')}
+                        />
+                        <PriceCard 
                             label="Envoi de photo" 
                             cost={FEATURE_COSTS.SEND_PHOTO} 
                             icon="📸" 
-                            onPress={() => Alert.alert('Envoi de photo', 'Permet d\'envoyer une photo dans une conversation.')}
+                            onPress={() => alert('Envoi de photo', 'Permet d\'envoyer une photo dans une conversation.')}
                         />
-                        <PriceRow 
-                            label="Invitation"
-                            cost={FEATURE_COSTS.INVITE}
-                            icon="💌"
-                            onPress={() => {
-                                Alert.alert(
-                                    'Acheter des invitations',
-                                    'Choisissez un pack :',
-                                    [
-                                        { text: 'Annuler', style: 'cancel' },
-                                        { text: `1 Invitation (${FEATURE_COSTS.INVITE} Pins)`, onPress: () => confirmPurchase('INVITE', FEATURE_COSTS.INVITE) },
-                                        { text: `5 Invitations (${FEATURE_COSTS.INVITE_BUNDLE_5} Pins)`, onPress: () => confirmPurchase('INVITE_BUNDLE_5', FEATURE_COSTS.INVITE_BUNDLE_5) },
-                                        { text: `15 Invitations (${FEATURE_COSTS.INVITE_BUNDLE_15} Pins)`, onPress: () => confirmPurchase('INVITE_BUNDLE_15', FEATURE_COSTS.INVITE_BUNDLE_15) },
-                                    ]
-                                );
-                            }}
-                        />
-                        <PriceRow 
-                            label="Annuler un swipe (Undo)" 
+                        <PriceCard 
+                            label="Annuler un swipe" 
                             cost={FEATURE_COSTS.UNDO} 
                             icon="↩️" 
-                            onPress={() => Alert.alert('Annuler un swipe', 'Revenez en arrière sur votre dernier swipe à gauche.')}
+                            onPress={() => setSelectedFeature('UNDO')}
                         />
-                    </View>
+                    </ScrollView>
                 </View>
 
 
@@ -884,6 +1383,9 @@ function StoreModalContent({ onClose, initialTab, onBalanceUpdate }: { onClose: 
 
           {/* Footer Legal & Restore */}
             <View style={{ marginTop: 40, alignItems: 'center', gap: 15, paddingBottom: 40 }}>
+             <Text style={{ color: C.muted, fontSize: 12, textAlign: 'center', lineHeight: 16 }}>
+                Les abonnements se renouvellent automatiquement sauf annulation au moins 24h avant la fin de la période en cours. La gestion et l’annulation se font dans les réglages de votre App Store.
+             </Text>
              <TouchableOpacity onPress={handleRestore} style={{ padding: 10 }}>
                 <Text style={{ color: C.muted, textDecorationLine: 'underline' }}>Restaurer les achats</Text>
              </TouchableOpacity>
@@ -899,6 +1401,80 @@ function StoreModalContent({ onClose, initialTab, onBalanceUpdate }: { onClose: 
           </View>
         </ScrollView>
       </SafeAreaView>
+
+      <Modal 
+        visible={!!selectedFeature} 
+        transparent 
+        animationType="fade"
+        onRequestClose={() => setSelectedFeature(null)}
+      >
+        <Pressable 
+            style={StyleSheet.absoluteFill} 
+            onPress={() => setSelectedFeature(null)}
+        >
+            <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+                <Pressable onPress={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 400, backgroundColor: C.card, borderRadius: 24, padding: 24, borderWidth: 1, borderColor: C.panelBorder }}>
+                    {selectedFeature && FEATURES_CONFIG[selectedFeature] && (
+                        <>
+                            <View style={{ alignItems: 'center', marginBottom: 20 }}>
+                                <View style={{ width: 60, height: 60, borderRadius: 30, backgroundColor: 'rgba(255,255,255,0.05)', alignItems: 'center', justifyContent: 'center', marginBottom: 15 }}>
+                                    <Text style={{ fontSize: 30 }}>{FEATURES_CONFIG[selectedFeature].icon}</Text>
+                                </View>
+                                <Text style={{ color: C.text, fontSize: 22, fontWeight: 'bold', textAlign: 'center' }}>
+                                    {FEATURES_CONFIG[selectedFeature].title}
+                                </Text>
+                                <Text style={{ color: C.subtleText, textAlign: 'center', marginTop: 8, fontSize: 14 }}>
+                                    {FEATURES_CONFIG[selectedFeature].description}
+                                </Text>
+                            </View>
+
+                            <View style={{ gap: 12 }}>
+                                {FEATURES_CONFIG[selectedFeature].packs.map((pack: any) => (
+                                    <TouchableOpacity
+                                        key={pack.id}
+                                        onPress={() => {
+                                            setSelectedFeature(null);
+                                            confirmPurchase(pack.id, pack.price);
+                                        }}
+                                        style={{ 
+                                            flexDirection: 'row', 
+                                            alignItems: 'center', 
+                                            justifyContent: 'space-between',
+                                            backgroundColor: C.panel,
+                                            padding: 16,
+                                            borderRadius: 16,
+                                            borderWidth: 1,
+                                            borderColor: pack.tag ? ACCENT : 'transparent'
+                                        }}
+                                    >
+                                        <View>
+                                            {pack.tag && (
+                                                <Text style={{ color: ACCENT, fontSize: 10, fontWeight: 'bold', marginBottom: 4 }}>
+                                                    {pack.tag} {pack.savings && `- ECO ${pack.savings}`}
+                                                </Text>
+                                            )}
+                                            <Text style={{ color: C.text, fontWeight: 'bold', fontSize: 16 }}>{pack.label}</Text>
+                                        </View>
+                                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(0,0,0,0.2)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20 }}>
+                                            <Text style={{ color: C.text, fontWeight: 'bold' }}>{pack.price}</Text>
+                                            <Image source={PINS_IMG} style={{ width: 14, height: 14 }} resizeMode="contain" />
+                                        </View>
+                                    </TouchableOpacity>
+                                ))}
+                            </View>
+
+                            <TouchableOpacity 
+                                onPress={() => setSelectedFeature(null)}
+                                style={{ marginTop: 20, alignItems: 'center', padding: 10 }}
+                            >
+                                <Text style={{ color: C.subtleText, fontWeight: '600' }}>Annuler</Text>
+                            </TouchableOpacity>
+                        </>
+                    )}
+                </Pressable>
+            </View>
+        </Pressable>
+      </Modal>
 
       {loading && (
         <View style={{ position: 'absolute', inset: 0, backgroundColor: 'rgba(0,0,0,0.8)', alignItems: 'center', justifyContent: 'center' }}>
@@ -922,6 +1498,75 @@ function FeatureRow({ text, gold }: { text: string, gold?: boolean }) {
             </View>
             <Text style={{ color: C.subtleText, fontSize: 15, fontWeight: '500' }}>{text}</Text>
         </View>
+    );
+}
+
+function EarnRow({ label, sub, reward, icon, onPress, completed, completedLabel = 'Fait' }: { label: string, sub: string, reward: string, icon: string, onPress: () => void, completed?: boolean, completedLabel?: string }) {
+    return (
+        <TouchableOpacity 
+            onPress={onPress}
+            activeOpacity={0.7}
+            disabled={completed}
+            style={{ 
+                flexDirection: 'row', 
+                alignItems: 'center', 
+                padding: 15, 
+                borderBottomWidth: 1, 
+                borderBottomColor: 'rgba(255,255,255,0.05)',
+                opacity: completed ? 0.6 : 1
+            }}
+        >
+            <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(249, 115, 22, 0.15)', alignItems: 'center', justifyContent: 'center', marginRight: 15 }}>
+                <Text style={{ fontSize: 20 }}>{icon}</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+                <Text style={{ color: C.text, fontWeight: 'bold', fontSize: 16 }}>{label}</Text>
+                <Text style={{ color: C.subtleText, fontSize: 12 }}>{completed ? completedLabel : sub}</Text>
+            </View>
+            <View style={{ alignItems: 'flex-end' }}>
+                {completed ? (
+                    <View style={{ backgroundColor: 'rgba(22, 163, 74, 0.2)', padding: 6, borderRadius: 20 }}>
+                        <Ionicons name="checkmark-circle" size={24} color={C.success} />
+                    </View>
+                ) : (
+                    <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255, 215, 0, 0.1)', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12 }}>
+                        <Text style={{ color: GOLD, fontWeight: 'bold', fontSize: 14 }}>+{reward}</Text>
+                        <Image source={PINS_IMG} style={{ width: 14, height: 14, marginLeft: 4 }} resizeMode="contain" />
+                    </View>
+                )}
+            </View>
+        </TouchableOpacity>
+    );
+}
+
+function PriceCard({ label, cost, icon, onPress }: { label: string, cost: number, icon: string, onPress?: () => void }) {
+    return (
+        <TouchableOpacity 
+            onPress={onPress}
+            activeOpacity={0.7}
+            style={{ 
+                width: 130,
+                height: 150,
+                backgroundColor: C.card, 
+                borderRadius: 16, 
+                padding: 12, 
+                justifyContent: 'space-between',
+                borderWidth: 1, 
+                borderColor: C.panelBorder,
+            }}
+        >
+             <View style={{ alignItems: 'flex-start' }}>
+                <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(255,255,255,0.05)', alignItems: 'center', justifyContent: 'center', marginBottom: 10 }}>
+                    <Text style={{ fontSize: 18 }}>{icon}</Text>
+                </View>
+                <Text style={{ color: C.text, fontSize: 13, fontWeight: 'bold', lineHeight: 18 }} numberOfLines={2}>{label}</Text>
+            </View>
+            
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: C.panel, alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 10 }}>
+                <Text style={{ color: C.text, fontWeight: 'bold', fontSize: 13 }}>{cost}</Text>
+                <Image source={PINS_IMG} style={{ width: 12, height: 12 }} resizeMode="contain" />
+            </View>
+        </TouchableOpacity>
     );
 }
 

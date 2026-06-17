@@ -1,18 +1,30 @@
-import React from 'react';
-import { View, Text, ViewStyle } from 'react-native';
-import MapView, { Marker, Circle, PROVIDER_GOOGLE } from 'react-native-maps';
-import Avatar from '../ui/Avatar';
+import { FontAwesome } from '@expo/vector-icons';
 import { router } from 'expo-router';
+import React from 'react';
+import { Text, View, ViewStyle } from 'react-native';
+import MapView, { Circle, Marker, PROVIDER_GOOGLE } from 'react-native-maps';
+import Avatar from '../ui/Avatar';
 
 export type Region = { latitude: number; longitude: number; latitudeDelta: number; longitudeDelta: number };
-export type NearbyUser = { id: string; name: string; age: number; lat: number; lng: number; distanceKm: number; img?: string; isBlur?: boolean; isOnline?: boolean };
+export type NearbyUser = { 
+  id: string; 
+  name: string; 
+  age: number; 
+  lat: number; 
+  lng: number; 
+  distanceKm: number; 
+  img?: string; 
+  isBlur?: boolean; 
+  isOnline?: boolean;
+  subscription?: 'FREE' | 'PLUS' | 'PRO';
+};
 type SelfMarker = { lat: number; lng: number; img?: string; focusX?: number; focusY?: number; zoom?: number };
 
 type Props = {
   mapRef: React.RefObject<any>;
   style?: ViewStyle;
   scheme: 'dark' | 'light' | null | undefined;
-  C: { tint: string; card: string; border: string; text: string };
+  C: { tint: string; card: string; border: string; text: string; gold: string };
   region: Region;
   setRegion: (r: Region) => void;
   nearby: NearbyUser[];
@@ -20,6 +32,11 @@ type Props = {
   self?: SelfMarker | null;
   radiusKm?: number;
   onClusterSelect?: (users: NearbyUser[]) => void;
+  logoEnabled?: boolean;
+  rotateEnabled?: boolean;
+  pitchEnabled?: boolean;
+  dailyBase?: { lat: number; lng: number } | null;
+  subscription?: 'FREE' | 'PLUS' | 'PRO';
 };
 
 const darkMapStyle = [
@@ -44,7 +61,10 @@ const lightMapStyle = [
   { featureType: 'water', stylers: [{ color: '#c7d2fe' }] },
 ];
 
-export default function NativeMap({ mapRef, style, scheme, C, region, setRegion, nearby, onSelect, self, radiusKm, onClusterSelect }: Props) {
+export default function NativeMap({ 
+  mapRef, style, scheme, C, region, setRegion, nearby, onSelect, self, radiusKm, onClusterSelect,
+  logoEnabled = true, rotateEnabled = true, pitchEnabled = true, dailyBase = null, subscription = 'FREE'
+}: Props) {
   // Charger react-native-maps uniquement sur natif et à l'intérieur du rendu
   const MapBase = MapView;
 
@@ -85,7 +105,14 @@ export default function NativeMap({ mapRef, style, scheme, C, region, setRegion,
       userInterfaceStyle={scheme === 'dark' ? 'dark' : 'light'}
       showsCompass={false}
       toolbarEnabled={false}
-      pitchEnabled
+      pitchEnabled={pitchEnabled}
+      rotateEnabled={rotateEnabled}
+      moveOnMarkerPress={false}
+      showsPointsOfInterest={false}
+      showsBuildings={false}
+      showsIndoors={false}
+      showsIndoorLevelPicker={false}
+      showsTraffic={false}
       loadingEnabled
       loadingIndicatorColor={C.tint}
       customMapStyle={scheme === 'dark' ? darkMapStyle : lightMapStyle}
@@ -100,6 +127,45 @@ export default function NativeMap({ mapRef, style, scheme, C, region, setRegion,
           fillColor={hexToRgba(C.tint, 0.10)}
         />
       )}
+
+      {/* Pin de Zone Journalière (Base) */}
+      {dailyBase && (
+        <Marker
+          key="__daily_base"
+          coordinate={{ latitude: dailyBase.lat, longitude: dailyBase.lng }}
+          tracksViewChanges={false}
+          zIndex={5}
+        >
+          <View style={{ alignItems: 'center', justifyContent: 'center' }}>
+            <View style={{ 
+              backgroundColor: '#3BA55D', 
+              padding: 6, 
+              borderRadius: 20, 
+              borderWidth: 2, 
+              borderColor: '#fff',
+              shadowColor: '#000',
+              shadowOffset: { width: 0, height: 2 },
+              shadowOpacity: 0.3,
+              shadowRadius: 3,
+              elevation: 5
+            }}>
+              <FontAwesome name="map-pin" size={20} color="#fff" />
+            </View>
+            <View style={{ 
+              backgroundColor: 'rgba(59, 165, 93, 0.2)', 
+              paddingHorizontal: 8, 
+              paddingVertical: 2, 
+              borderRadius: 10, 
+              marginTop: 4,
+              borderWidth: 1,
+              borderColor: 'rgba(255, 255, 255, 0.3)'
+            }}>
+              <Text style={{ color: '#fff', fontSize: 10, fontWeight: '800' }}>MA ZONE</Text>
+            </View>
+          </View>
+        </Marker>
+      )}
+
       {self && (
         <Marker
           key={'__me'}
@@ -113,8 +179,8 @@ export default function NativeMap({ mapRef, style, scheme, C, region, setRegion,
         >
             <View style={{ width: 48, height: 48, alignItems: 'center', justifyContent: 'center' }}>
               {/* Glow accent autour de Moi */}
-              <View style={{ position: 'absolute', width: 48, height: 48, borderRadius: 24, backgroundColor: hexToRgba(C.tint, 0.20) }} />
-              <Avatar uri={self.img} initials={'M'} size={40} ring ringColor={C.tint} ringWidth={3} focusX={typeof self.focusX === 'number' ? self.focusX : undefined} focusY={typeof self.focusY === 'number' ? self.focusY : undefined} zoom={typeof (self as any).zoom === 'number' ? (self as any).zoom : undefined} useRNImage />
+              <View style={{ position: 'absolute', width: 48, height: 48, borderRadius: 24, backgroundColor: hexToRgba(subscription === 'PRO' ? C.gold : C.tint, 0.20) }} />
+              <Avatar uri={self.img} initials={'M'} size={40} ring subscription={subscription} focusX={typeof self.focusX === 'number' ? self.focusX : undefined} focusY={typeof self.focusY === 'number' ? self.focusY : undefined} zoom={typeof (self as any).zoom === 'number' ? (self as any).zoom : undefined} useRNImage />
             </View>
         </Marker>
       )}
@@ -139,7 +205,8 @@ export default function NativeMap({ mapRef, style, scheme, C, region, setRegion,
                       initials={first.name.charAt(0)} 
                       size={38} 
                       ring 
-                      ringColor={first.isOnline ? C.tint : '#888'} // Green vs Gray ring
+                      subscription={first.subscription}
+                      ringColor={first.isOnline ? C.tint : '#888'}
                       useRNImage 
                       blurRadius={first.isBlur ? 8 : 0} 
                     />
@@ -171,7 +238,7 @@ export default function NativeMap({ mapRef, style, scheme, C, region, setRegion,
                 <View style={{ alignItems: 'center' }}>
                   {/* Avatar principal du cluster + badge nombre */}
                   <View style={{ position: 'relative' }}>
-                    <Avatar uri={first.img} initials={first.name.charAt(0)} size={42} ring useRNImage blurRadius={first.isBlur ? 8 : 0} />
+                    <Avatar uri={first.img} initials={first.name.charAt(0)} size={42} ring subscription={first.subscription} useRNImage blurRadius={first.isBlur ? 8 : 0} />
                     <View style={{ position: 'absolute', right: -6, bottom: -6, minWidth: 26, height: 22, borderRadius: 11, backgroundColor: C.tint, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 }}>
                       <Text style={{ color: '#fff', fontWeight: '900', fontSize: 12 }}>
                         {/* Si cluster flouté, on met "+..." comme demandé si nombre > 9 par ex, sinon juste nombre */}
@@ -198,7 +265,8 @@ export default function NativeMap({ mapRef, style, scheme, C, region, setRegion,
                   initials={u.name.charAt(0)} 
                   size={38} 
                   ring 
-                  ringColor={u.isOnline ? C.tint : '#888'} 
+                  subscription={u.subscription}
+                  ringColor={u.isOnline ? C.tint : '#888'}
                   useRNImage 
                   blurRadius={u.isBlur ? 8 : 0} 
                 />

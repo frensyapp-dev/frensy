@@ -1,12 +1,14 @@
 // app/settings.tsx
+import { useDialog } from '@/components/ui/Dialog';
 import { useToast } from '@/components/ui/Toast';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import MultiSlider from '@ptomasroos/react-native-multi-slider';
+import { useFocusEffect } from '@react-navigation/native';
 import { router } from 'expo-router';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Alert, LayoutChangeEvent, Linking, Modal,
+  LayoutChangeEvent, Linking, Modal,
   ScrollView, StyleSheet, Switch, Text,
   TextInput, TouchableOpacity, View
 } from 'react-native';
@@ -15,7 +17,10 @@ import { Collapsible } from '../components/Collapsible';
 import { ACTIVITIES, ACTIVITY_LABELS } from '../constants/Activities';
 import { Colors } from '../constants/Colors';
 import { auth } from '../firebaseconfig';
-import { deleteUserData, getUserProfile, savePartialProfile, UserProfile } from '../lib/profile';
+import { useSubscription } from '../hooks/useSubscription';
+import { deleteEntireUserAccount } from '../lib/deleteAccount';
+import { getUserProfile, savePartialProfile, UserProfile } from '../lib/profile';
+import { syncRevenueCatPurchases } from '../lib/revenuecat';
 
 /** Bornes d’âge pour une app 18+ (tous les comptes sont adultes) */
 const boundsForAge = (age?: number) => {
@@ -54,7 +59,9 @@ const ALL_GENDERS   = ['hommes', 'femmes', 'autres'] as const;
 
 export default function SettingsScreen() {
   const { showToast } = useToast();
+  const { alert, confirm } = useDialog();
   const [p, setP] = useState<UserProfile | null>(null);
+  const mySubscription = useSubscription(p?.subscription);
 
   // lock & âge / tranche
   const [age, setAge] = useState('');
@@ -82,49 +89,67 @@ export default function SettingsScreen() {
 
   const C = Colors['dark'];
   const insets = useSafeAreaInsets();
-  const isPremium = p?.subscription === 'PLUS' || p?.subscription === 'PRO';
-  const isPro = p?.subscription === 'PRO';
+  const isPremium = mySubscription === 'PLUS' || mySubscription === 'PRO';
+  const isPro = mySubscription === 'PRO';
+
+  const loadSettingsProfile = useCallback(async (uid: string, fallbackEmail?: string | null) => {
+    const prof = await getUserProfile(uid);
+    setP(prof);
+
+    const curAge = prof?.age ?? 18;
+    setAge(String(curAge));
+    setGenderIdentity(prof?.genderIdentity ?? null);
+    const b = boundsForAge(curAge);
+    setMinBound(b.min);
+    setMaxBound(b.max);
+
+    const hasRange = typeof prof?.desiredMinAge === 'number' && typeof prof?.desiredMaxAge === 'number';
+    const base = hasRange
+      ? { min: prof!.desiredMinAge!, max: prof!.desiredMaxAge! }
+      : defaultRangeForAge(curAge);
+
+    const clamped = clampRangeToIncludeAge(base.min, base.max, curAge, b);
+    setMinAge(clamped.min);
+    setMaxAge(clamped.max);
+
+    const patch: any = {};
+    if (prof?.ageLock !== 'adult') patch.ageLock = 'adult';
+    if (typeof prof?.age !== 'number' || prof.age < 18) patch.age = curAge;
+    if (!hasRange) {
+      patch.desiredMinAge = clamped.min;
+      patch.desiredMaxAge = clamped.max;
+    }
+    if (Object.keys(patch).length) await savePartialProfile(uid, patch);
+
+    setInterests(prof?.interests ?? []);
+    setGenders(prof?.genders ?? []);
+    setRadiusKm(prof?.discoveryRadiusKm ?? 100);
+    setUseStrictFilters(prof?.useStrictFilters ?? false);
+    setInstagram(prof?.contacts?.instagram ?? '');
+    setTiktok(prof?.contacts?.tiktok ?? '');
+    setContactEmail(prof?.contacts?.email ?? (fallbackEmail ?? auth.currentUser?.email ?? ''));
+  }, []);
 
   useEffect(() => {
     return onAuthStateChanged(auth, async (u) => {
       if (!u) return;
-      const prof = await getUserProfile(u.uid);
-      setP(prof);
-
-      // init âge & bornes
-      const curAge = prof?.age ?? 18;
-      setAge(String(curAge));
-      setGenderIdentity(prof?.genderIdentity ?? null);
-      const b = boundsForAge(curAge);
-      setMinBound(b.min); setMaxBound(b.max);
-
-      // base range = profil existant sinon défaut autour de l’âge
-      const hasRange = typeof prof?.desiredMinAge === 'number' && typeof prof?.desiredMaxAge === 'number';
-      const base = hasRange
-        ? { min: prof!.desiredMinAge!, max: prof!.desiredMaxAge! }
-        : defaultRangeForAge(curAge);
-
-      const clamped = clampRangeToIncludeAge(base.min, base.max, curAge, b);
-      setMinAge(clamped.min); setMaxAge(clamped.max);
-
-      // si range absente → sauvegarde immédiate
-      const patch: any = {};
-      if (prof?.ageLock !== 'adult') patch.ageLock = 'adult';
-      if (!hasRange) {
-        patch.desiredMinAge = clamped.min;
-        patch.desiredMaxAge = clamped.max;
-      }
-      if (Object.keys(patch).length) await savePartialProfile(u.uid, patch);
-
-      setInterests(prof?.interests ?? []);
-      setGenders(prof?.genders ?? []);
-      setRadiusKm(prof?.discoveryRadiusKm ?? 100);
-      setUseStrictFilters(prof?.useStrictFilters ?? false);
-      setInstagram(prof?.contacts?.instagram ?? '');
-      setTiktok(prof?.contacts?.tiktok ?? '');
-      setContactEmail(prof?.contacts?.email ?? (u.email ?? ''));
+      await loadSettingsProfile(u.uid, u.email);
     });
-  }, []);
+  }, [loadSettingsProfile]);
+
+  useFocusEffect(
+    useCallback(() => {
+      const uid = auth.currentUser?.uid;
+      if (!uid) return;
+      let cancelled = false;
+      (async () => {
+        await syncRevenueCatPurchases().catch(() => null);
+        if (cancelled) return;
+        await loadSettingsProfile(uid);
+      })();
+      return () => { cancelled = true; };
+    }, [loadSettingsProfile])
+  );
 
   // bornes dynamiques quand l’âge change → la tranche doit inclure l’âge
   useEffect(() => {
@@ -161,7 +186,7 @@ export default function SettingsScreen() {
             return prev.filter(i => i !== id);
         } else {
             if (prev.length >= 10) {
-                Alert.alert('Limite atteinte', 'Tu ne peux sélectionner que 10 centres d\'intérêt maximum.');
+                alert('Limite atteinte', 'Tu ne peux sélectionner que 10 centres d\'intérêt maximum.');
                 return prev;
             }
             return [...prev, id];
@@ -194,6 +219,8 @@ export default function SettingsScreen() {
     const patch: any = {
       age: lockedAge,
       ageLock: 'adult',
+      birthDate: null,
+      birthday: null,
       desiredMinAge: clamped.min,
       desiredMaxAge: clamped.max,
       interests: interests,
@@ -215,12 +242,12 @@ export default function SettingsScreen() {
       router.replace('/(tabs)/profile');
     } catch (e: any) {
       console.error('settings/save error:', e?.code, e?.message);
-      Alert.alert('Erreur', 'Impossible d’enregistrer : ' + (e?.message ?? 'inconnue'));
+      alert('Erreur', 'Impossible d’enregistrer : ' + (e?.message ?? 'inconnue'));
     }
   };
 
   const cancelSubscription = async () => {
-    Alert.alert(
+    alert(
       "Résilier l'abonnement",
       "Es-tu sûr de vouloir résilier tous tes abonnements et revenir au plan gratuit ? Cette action est immédiate.",
       [
@@ -252,7 +279,7 @@ export default function SettingsScreen() {
   };
 
   const deleteAccount = async () => {
-    Alert.alert(
+    alert(
       "Supprimer mon compte",
       "Es-tu sûr de vouloir supprimer définitivement ton compte ? Cette action est irréversible et toutes tes données seront perdues.",
       [
@@ -262,19 +289,17 @@ export default function SettingsScreen() {
           style: "destructive",
           onPress: async () => {
              const uid = auth.currentUser?.uid;
-             const user = auth.currentUser;
-             if (!uid || !user) return;
+             if (!uid) return;
              
              try {
-               await deleteUserData(uid);
-               await user.delete();
+               await deleteEntireUserAccount();
                // User is now deleted and signed out
                router.replace('/');
                showToast('Adieu', 'Ton compte a été supprimé.', 'success');
              } catch (e: any) {
                console.error("Delete account error:", e);
                if (e.code === 'auth/requires-recent-login') {
-                  Alert.alert("Sécurité", "Par mesure de sécurité, reconnecte-toi avant de supprimer ton compte.");
+                  alert("Sécurité", "Par mesure de sécurité, reconnecte-toi avant de supprimer ton compte.");
                   await signOut(auth);
                   router.replace('/');
                } else {
@@ -306,7 +331,7 @@ export default function SettingsScreen() {
         contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 16, gap: 14 }}
       >
         {/* Préférences */}
-        <Collapsible title="Préférences de rencontre" defaultOpen>
+        <Collapsible title="Préférences" defaultOpen>
           <View style={[styles.card, { backgroundColor: C.card, borderColor: C.border }]}> 
           
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
@@ -320,7 +345,7 @@ export default function SettingsScreen() {
                 value={useStrictFilters} 
                 onValueChange={(v) => {
                     if (v && !isPremium) {
-                        Alert.alert(
+                        alert(
                             'Fonctionnalité PLUS',
                             'Passez à Frensy PLUS pour filtrer strictement les profils par genre et type de relation.',
                             [
@@ -493,35 +518,14 @@ export default function SettingsScreen() {
         <Collapsible title="Infos de base" defaultOpen>
           <View style={[styles.card, { backgroundColor: C.card, borderColor: C.border }]}> 
           <Label>Âge</Label>
-          {p?.age ? (
-            <View>
-              <TextInput
-                value={String(p.age)}
-                editable={false}
-                selectTextOnFocus={false}
-                style={[styles.input, { color: C.muted, borderColor: C.border, backgroundColor: 'rgba(0,0,0,0.04)' }]}
-              />
-              <Text style={{ color: C.muted, fontSize: 12, marginTop: 4 }}>
-                Âge défini à l’inscription. Contacte le support pour changer.
-              </Text>
-            </View>
-          ) : (
-            <TextInput
-              value={age}
-              onChangeText={(t) => {
-                const digits = t.replace(/[^\d]/g, '');
-                const n = parseInt(digits || '0', 10);
-                const b = boundsForAge(n || undefined);
-                const clamped = digits ? String(Math.max(b.min, Math.min(n, b.max))) : '';
-                setAge(clamped);
-              }}
-              keyboardType="number-pad"
-              placeholder={`${minBound}–${maxBound}`}
-              placeholderTextColor={C.muted}
-              style={[styles.input, { color: C.text, borderColor: C.border }]}
-              maxLength={3}
-            />
-          )}
+          <TextInput
+            value={age}
+            editable={false}
+            style={[styles.input, { color: C.muted, borderColor: 'transparent', backgroundColor: 'rgba(255,255,255,0.02)' }]}
+          />
+          <Text style={{ color: 'rgba(249, 115, 22, 0.6)', fontSize: 11, marginTop: 4, fontWeight: '600' }}>
+            L&apos;âge ne peut plus être modifié pour des raisons de sécurité.
+          </Text>
 
           <Label style={{ marginTop: 12 }}>Taille (cm)</Label>
           <TouchableOpacity

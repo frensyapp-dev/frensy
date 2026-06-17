@@ -37,7 +37,9 @@ export async function revokeLocationShare(chatId: string) {
     const uid = auth.currentUser?.uid;
     if (uid) {
         const shareId = `${uid}_${chatId}`;
-        await setDoc(doc(db, 'locationShares', shareId), { active: false, revoked: true, updatedAt: serverTimestamp() }, { merge: true });
+        try {
+          await updateDoc(doc(db, 'locationShares', shareId), { active: false, revoked: true, updatedAt: serverTimestamp() });
+        } catch {}
     }
 }
 

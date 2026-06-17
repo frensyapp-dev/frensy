@@ -79,7 +79,7 @@ export default function AccountTypeStep() {
                         type="individual" 
                         icon="user" 
                         title="Compte Solo" 
-                        subtitle="Je veux rencontrer des gens pour moi-même." 
+                        subtitle="Je veux decouvrir des gens autour de moi pour discuter ou sortir." 
                     />
                     
                     <OptionCard 
@@ -102,7 +102,15 @@ export default function AccountTypeStep() {
 }
 
 const s = StyleSheet.create({
-  container: { flex: 1, paddingHorizontal: 24, paddingTop: 60, paddingBottom: 20 },
+  container: { 
+    flex: 1, 
+    paddingHorizontal: 24, 
+    paddingTop: 60, 
+    paddingBottom: 20,
+    width: '100%',
+    maxWidth: 500,
+    alignSelf: 'center',
+  },
   glow: { position: 'absolute', top: -150, right: -100, width: 400, height: 400, borderRadius: 200, backgroundColor: 'rgba(249, 115, 22, 0.1)' },
   content: { flex: 1, marginTop: 40 },
   stepIndicator: { color: '#F97316', fontWeight: '700', fontSize: 14, marginBottom: 16, letterSpacing: 1, textTransform: 'uppercase' },

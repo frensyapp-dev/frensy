@@ -26,7 +26,7 @@ service cloud.firestore {
           'desiredMinAge','desiredMaxAge','discoveryRadiusKm','heightCm',
           'photos','primaryPhotoPath','ageLock','contacts','avatarFocusX',
           'avatarFocusY','avatarZoom','noteText','completed','createdAt',
-          'updatedAt','expoPushToken','notifications','ghostMode'
+          'updatedAt','ghostMode'
         ])
         && (
           !('createdAt' in request.resource.data) || request.resource.data.createdAt is timestamp
@@ -46,7 +46,9 @@ service cloud.firestore {
           'photos','primaryPhotoPath','ageLock','contacts','avatarFocusX',
           'avatarFocusY','avatarZoom','noteText','completed','updatedAt',
           'expoPushToken','notifications','ghostMode','messagesSentCount'
-        ]);
+        ])
+        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['expoPushToken']) || !('expoPushToken' in request.resource.data))
+        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['notifications']) || !('notifications' in request.resource.data));
       allow delete: if isOwner(uid);
       
       // Subcollection for joined groups persistence
@@ -60,7 +62,10 @@ service cloud.firestore {
       allow read: if isOwner(uid);
       allow delete: if isOwner(uid);
       allow write: if isOwner(uid) && (
-        resource == null || (
+        resource == null ? (
+          !('unlockedLikes' in request.resource.data)
+        ) : (
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['unlockedLikes']) &&
           // Sécurité: Empêcher l'augmentation du solde (pins) ou l'upgrade abonnement via le client
           // Seules les Cloud Functions (Admin SDK) peuvent créditer. Le client peut seulement débiter (dépenser).
           request.resource.data.get('pins', 0) <= resource.data.get('pins', 0) &&
@@ -86,7 +91,7 @@ service cloud.firestore {
 
     // Likes: utilisé pour le matching
     match /likes/{likeId} {
-      allow get: if isSignedIn();
+      allow get: if isSignedIn() && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
       allow list: if isSignedIn() && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
       allow create: if isSignedIn() &&
         request.resource.data.from == request.auth.uid &&
@@ -126,15 +131,37 @@ service cloud.firestore {
         && request.resource.data.keys().hasOnly([
             'uid', 'lat', 'lng', 'geohash', 'updatedAt', 'updatedAtMs', 
             'precisionKm', 'accuracy', 'name', 'age', 'boostExpiresAt', 
-            'manualBaseExpiresAt', 'isManualBase', 'img'
+            'manualBaseExpiresAt', 'isManualBase', 'img', 'baseLat', 'baseLng',
+            'mapVisibleUntilMs'
         ]);
       allow delete: if isOwner(uid);
     }
 
     match /locationShares/{shareId} {
       allow read: if isSignedIn() && (request.auth.uid == resource.data.from || request.auth.uid == resource.data.to);
-      allow create: if isSignedIn() && request.resource.data.from == request.auth.uid;
-      allow update: if isSignedIn() && (request.auth.uid == resource.data.from || request.auth.uid == resource.data.to);
+      allow create: if isSignedIn()
+        && request.resource.data.from == request.auth.uid
+        && request.resource.data.to is string
+        && shareId == request.auth.uid + '_' + request.resource.data.to
+        && request.resource.data.keys().hasOnly([
+          'from','to','active','revoked','createdAt','updatedAt','expiresAtMs',
+          'liveLat','liveLng','liveAccuracy','liveUpdatedAtMs'
+        ]);
+      allow update: if isSignedIn()
+        && (request.auth.uid == resource.data.from || request.auth.uid == resource.data.to)
+        && request.resource.data.from == resource.data.from
+        && request.resource.data.to == resource.data.to
+        && (
+          request.auth.uid == resource.data.from
+            ? request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                'active','revoked','createdAt','updatedAt','expiresAtMs',
+                'liveLat','liveLng','liveAccuracy','liveUpdatedAtMs'
+              ])
+            : request.resource.data.diff(resource.data).affectedKeys().hasOnly(['active','revoked','updatedAt'])
+              && request.resource.data.active == false
+              && request.resource.data.revoked == true
+        );
+      allow delete: if isSignedIn() && (request.auth.uid == resource.data.from || request.auth.uid == resource.data.to);
     }
 
     match /locationAccessLogs/{logId} {
@@ -143,10 +170,21 @@ service cloud.firestore {
     }
 
     match /chatRequests/{id} {
-      allow create: if isSignedIn();
-      allow read: if isSignedIn();
-      allow update: if isSignedIn();
-      allow delete: if isSignedIn();
+      allow read: if isSignedIn() && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
+      allow create: if isSignedIn()
+        && request.resource.data.from == request.auth.uid
+        && request.resource.data.to is string
+        && request.resource.data.to != request.auth.uid
+        && id == request.auth.uid + '_' + request.resource.data.to
+        && request.resource.data.keys().hasOnly([
+          'from','to','status','messageText','imageUrl','imageW','imageH','isSuper','createdAt','updatedAt'
+        ])
+        && request.resource.data.status == 'pending';
+      allow update: if isSignedIn()
+        && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','updatedAt'])
+        && request.resource.data.status in ['pending','accepted','rejected'];
+      allow delete: if isSignedIn() && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
     }
 
     match /reports/{reportId} {

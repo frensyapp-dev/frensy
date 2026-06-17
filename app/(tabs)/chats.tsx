@@ -213,6 +213,9 @@ export default function ChatsScreen({ embedded }: { embedded?: boolean } = {}) {
       .filter(m => {
           const me = auth.currentUser?.uid;
           const partnerUid = m.users.find(u => u !== me) || '';
+          const prof = matchProfiles[partnerUid];
+          // Ne pas afficher les comptes supprimés dans la liste des discussions
+          if (prof?.deleted) return false;
           return isCompatible(partnerUid, matchProfiles);
       })
       .map(getConversationFromMatch);
@@ -322,7 +325,7 @@ export default function ChatsScreen({ embedded }: { embedded?: boolean } = {}) {
         </View>
       )}
 
-      <SafeAreaView style={{ flex: 1 }} edges={['top']}>
+      <SafeAreaView style={{ flex: 1, width: '100%', maxWidth: 600, alignSelf: 'center' }} edges={['top']}>
          {/* Header Custom */}
         <View style={{ paddingHorizontal: 16, paddingTop: 10, paddingBottom: 12, gap: 16 }}>
           <View style={{ height: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -402,7 +405,7 @@ export default function ChatsScreen({ embedded }: { embedded?: boolean } = {}) {
           (() => {
             const pendings = invitations
               .filter(r => r.status === 'pending')
-              .filter(r => isCompatible(r.from, invProfiles))
+              .filter(r => isCompatible(r.from, invProfiles) && !invProfiles[r.from]?.deleted)
               .sort((a, b) => (b.isSuper ? 1 : 0) - (a.isSuper ? 1 : 0));
 
             if (pendings.length === 0) {
@@ -511,7 +514,7 @@ export default function ChatsScreen({ embedded }: { embedded?: boolean } = {}) {
           filtered.length === 0 ? (
             <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 }}>
               <Text style={{ color: C.text, fontWeight: '800', fontSize: 16 }}>Aucune conversation</Text>
-              <Text style={{ color: C.muted, marginTop: 6, textAlign: 'center' }}>Vos chats apparaîtront ici. Allez dans Découvrir pour rencontrer des profils.</Text>
+              <Text style={{ color: C.muted, marginTop: 6, textAlign: 'center' }}>Vos chats apparaîtront ici. Allez dans Découvrir pour trouver des personnes ou des groupes autour de vous.</Text>
               <GradientButton 
                 label="Aller à Découvrir" 
                 onPress={() => router.push('/(tabs)/discover' as any)}

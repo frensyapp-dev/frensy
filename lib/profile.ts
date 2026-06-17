@@ -1,8 +1,8 @@
 // lib/profile.ts
 import dayjs from 'dayjs';
-import { deleteDoc, deleteField, doc, getDoc, runTransaction, serverTimestamp, setDoc, updateDoc, writeBatch } from 'firebase/firestore';
+import { deleteDoc, deleteField, doc, getDoc, serverTimestamp, setDoc, updateDoc, writeBatch } from 'firebase/firestore';
 import { auth, db } from '../firebaseconfig';
-import { checkAndResetLimits } from './monetization';
+import { checkAndResetLimits, lastActivationCache } from './monetization';
 
 export type UserPhoto = {
   path: string;
@@ -91,6 +91,7 @@ export type UserProfile = {
   useStrictFilters?: boolean;
 
   pinnedGroups?: string[];
+  consents?: { location?: boolean; notifications?: boolean; location_background?: boolean };
 
   deleted?: boolean;
   completed?: boolean;
@@ -111,7 +112,8 @@ const PRIVATE_FIELDS = new Set([
   'bonusInvites', 'bonusUndos', 'bonusBoosts', 'bonusUnlockLikes', 'bonusSuperInvites',
   'lastDailyReset', 'lastWeeklyReset', 'lastMonthlyReset',
   'unlockedLikes',
-  'ghostMode', 'useStrictFilters', 'pinnedGroups'
+  'ghostMode', 'useStrictFilters', 'pinnedGroups',
+  'consents'
 ]);
 
 async function migratePrivateData(uid: string, data: UserProfile) {
@@ -172,6 +174,14 @@ export async function getUserProfile(uid: string): Promise<UserProfile | null> {
              console.warn('Failed to load private data', e);
         }
     }
+
+    // Override with cached activation if present and fresh (avoid stale FREE status after purchase)
+    const cached = lastActivationCache.get(uid);
+    if (cached && Date.now() - cached.time < 45000) {
+        if (cached.tier !== 'FREE') {
+            data.subscription = cached.tier;
+        }
+    }
     
     // Check resets
     const resets = checkAndResetLimits(data);
@@ -187,8 +197,8 @@ export async function getUserProfile(uid: string): Promise<UserProfile | null> {
     }
   }
 
-  // Recalculate age if birthDate is present
-  if (data.birthDate) {
+  // Legacy fallback: only derive age from birthDate when no explicit age is stored.
+  if (typeof data.age !== 'number' && data.birthDate) {
     const calculatedAge = dayjs().diff(dayjs(data.birthDate), 'year');
     if (typeof calculatedAge === 'number' && !isNaN(calculatedAge)) {
       data.age = calculatedAge;
@@ -267,4 +277,3 @@ export async function deleteUserData(uid: string) {
   // but for now we focus on account data. 
   // A Cloud Function would be better for cleanup.
 }
-

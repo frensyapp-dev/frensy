@@ -2,28 +2,34 @@ import dayjs from 'dayjs';
 import { increment } from 'firebase/firestore';
 import type { UserProfile } from "./profile";
 
-export type SubscriptionTier = 'FREE' | 'PLUS' | 'PRO';export const SUBSCRIPTION_TIERS: Record<SubscriptionTier, SubscriptionTier> = {
+export type SubscriptionTier = 'FREE' | 'PLUS' | 'PRO';
+
+// Cache persistant pour éviter le clignotement de l'UI après achat/restauration
+// Partagé entre les différents écrans (Store, Profile, etc.)
+export const lastActivationCache = new Map<string, { tier: SubscriptionTier, time: number }>();
+
+export const SUBSCRIPTION_TIERS: Record<SubscriptionTier, SubscriptionTier> = {
   FREE: 'FREE',
   PLUS: 'PLUS',
   PRO: 'PRO',
 };
 
 export const COIN_PACKS = [
-  { id: 'coins_30', amount: 30, price: 0.49, label: '30 Pins' },
-  { id: 'coins_120', amount: 120, price: 0.99, label: '120 Pins', popular: true },
-  { id: 'coins_300', amount: 300, price: 1.99, label: '300 Pins' },
-  { id: 'coins_1000', amount: 1000, price: 4.99, label: '1000 Pins', bestValue: true },
-  { id: 'coins_3500', amount: 3500, price: 14.99, label: '3500 Pins' },
+  { id: 'coins_30', amount: 30, price: 0.99, label: '30 Pins' },
+  { id: 'coins_120', amount: 120, price: 1.99, label: '120 Pins', popular: true },
+  { id: 'coins_300', amount: 300, price: 3.99, label: '300 Pins' },
+  { id: 'coins_1000', amount: 1000, price: 9.99, label: '1000 Pins', bestValue: true },
+  { id: 'coins_3500', amount: 3500, price: 19.99, label: '3500 Pins' },
 ];
 
 export const SUBSCRIPTION_PLANS = {
   PLUS: [
-    { id: 'plus_1m', durationMonths: 1, price: 4.99, label: '1 mois' },
-    { id: 'plus_1y', durationMonths: 12, price: 29.99, label: '1 an', savings: '50%' }, // ≈ 2.50/mois
+    { id: 'plus_1m', durationMonths: 1, price: 4.99, label: 'Mensuel' },
+    { id: 'plus_1y', durationMonths: 12, price: 34.99, label: 'Annuel', savings: '50%' }, // ≈ 2.50/mois
   ],
   PRO: [
-    { id: 'pro_1m', durationMonths: 1, price: 9.99, label: '1 mois' },
-    { id: 'pro_1y', durationMonths: 12, price: 59.99, label: '1 an', savings: '50%' }, // ≈ 5/mois
+    { id: 'pro_1m', durationMonths: 1, price: 9.99, label: 'Mensuel' },
+    { id: 'pro_1y', durationMonths: 12, price: 79.99, label: 'Annuel', savings: '50%' }, // ≈ 5/mois
   ]
 };
 
@@ -43,6 +49,7 @@ export const FEATURE_COSTS = {
   UNLOCK_LIKE_BUNDLE_10: 250,
 
   UNDO: 20,
+  UNDO_BUNDLE_10: 150,
   SEND_PHOTO: 10,
 };
 
@@ -126,35 +133,33 @@ export function canPerformAction(
 
   switch (action) {
     case 'INVITE':
-      // 0. Check Bonus Inventory
-      if ((user.bonusInvites || 0) > 0) return { allowed: true };
-
-      // Check limits based on tier
+      // 0. Check limits based on tier (Infinite priority)
       if (limits.invitesPerDay === Infinity) return { allowed: true };
 
+      // 1. Check daily limits
       if (limits.invitesPerDay > 0 && (user.invitesUsedToday || 0) < limits.invitesPerDay) {
           return { allowed: true, remaining: limits.invitesPerDay - (user.invitesUsedToday || 0) };
       }
+
+      // 2. Check Bonus Inventory
+      if ((user.bonusInvites || 0) > 0) return { allowed: true };
       
-      // Fallback to coins (Additional Invite)
+      // 3. Fallback to coins (Additional Invite)
       if (coins >= FEATURE_COSTS.INVITE) {
         return { allowed: true, cost: FEATURE_COSTS.INVITE };
       }
       
-      // If we are here, limit reached and not enough coins
       return { allowed: false, reason: 'insufficient_coins' };
     
     case 'UNDO':
-      // 0. Check Bonus Inventory
-      if ((user.bonusUndos || 0) > 0) return { allowed: true };
-
       if (limits.undoPerDay === Infinity) return { allowed: true };
       
       if (limits.undoPerDay > 0 && (user.undoUsedToday || 0) < limits.undoPerDay) {
         return { allowed: true, remaining: limits.undoPerDay - (user.undoUsedToday || 0) };
       }
+
+      if ((user.bonusUndos || 0) > 0) return { allowed: true };
       
-      // Fallback to coins (UNDO)
       if (coins >= FEATURE_COSTS.UNDO) {
         return { allowed: true, cost: FEATURE_COSTS.UNDO };
       }
@@ -164,44 +169,44 @@ export function canPerformAction(
       return { allowed: false, reason: 'insufficient_coins' };
 
     case 'BOOST':
-      // 0. Check Bonus Inventory
-      if ((user.bonusBoosts || 0) > 0) return { allowed: true };
+      if (limits.boostPerWeek === Infinity) return { allowed: true };
 
       if (limits.boostPerWeek > 0 && (user.boostsUsedThisWeek || 0) < limits.boostPerWeek) {
          return { allowed: true, remaining: limits.boostPerWeek - (user.boostsUsedThisWeek || 0) };
       }
-      // Fallback to coins
+
+      if ((user.bonusBoosts || 0) > 0) return { allowed: true };
+
       if (coins >= FEATURE_COSTS.BOOST) {
         return { allowed: true, cost: FEATURE_COSTS.BOOST };
       }
       return { allowed: false, reason: 'insufficient_coins' };
       
     case 'SUPER_INVITE':
-      // 0. Check Bonus Inventory
-      if ((user.bonusSuperInvites || 0) > 0) return { allowed: true };
+      if (limits.superInvitesPerWeek === Infinity) return { allowed: true };
 
       if (limits.superInvitesPerWeek > 0 && (user.superInvitesUsedThisWeek || 0) < limits.superInvitesPerWeek) {
          return { allowed: true, remaining: limits.superInvitesPerWeek - (user.superInvitesUsedThisWeek || 0) };
       }
-      // Fallback to coins
+
+      if ((user.bonusSuperInvites || 0) > 0) return { allowed: true };
+
       if (coins >= FEATURE_COSTS.SUPER_INVITE) {
         return { allowed: true, cost: FEATURE_COSTS.SUPER_INVITE };
       }
       return { allowed: false, reason: 'insufficient_coins' };
 
     case 'CREATE_GROUP':
-      if (!limits.canCreateGroup) return { allowed: false, reason: 'subscription_required' };
-      if (limits.groupCreationPerMonth === Infinity || (user.groupsCreatedThisMonth || 0) < limits.groupCreationPerMonth) {
+      if (limits.groupCreationPerMonth === Infinity) return { allowed: true };
+      if (limits.canCreateGroup && (user.groupsCreatedThisMonth || 0) < limits.groupCreationPerMonth) {
         return { allowed: true };
       }
+      if (!limits.canCreateGroup) return { allowed: false, reason: 'subscription_required' };
       return { allowed: false, reason: 'limit_reached' };
 
     case 'UNLOCK_LIKE':
-      // 0. Check Bonus Inventory
-      if ((user.bonusUnlockLikes || 0) > 0) return { allowed: true };
-
-      // Always costs coins unless PRO (PRO has showLikesDetails=true, so they shouldn't call this)
       if (limits.showLikesDetails) return { allowed: true, cost: 0 }; 
+      if ((user.bonusUnlockLikes || 0) > 0) return { allowed: true };
       if (coins >= FEATURE_COSTS.UNLOCK_LIKE) {
         return { allowed: true, cost: FEATURE_COSTS.UNLOCK_LIKE };
       }
@@ -227,6 +232,7 @@ export function performActionUpdates(
 
   const updates: Partial<UserProfile> = {};
   const tier = user.subscription || 'FREE';
+  const limits = getLimits(tier);
 
   if (check.cost && check.cost > 0) {
     // @ts-ignore: increment is compatible with number but TypeScript complains in Partial<UserProfile>
@@ -238,42 +244,51 @@ export function performActionUpdates(
     
     switch (action) {
       case 'INVITE':
-        if ((user.bonusInvites || 0) > 0) {
-            updates.bonusInvites = (user.bonusInvites || 0) - 1;
-        } else if (tier === 'PLUS') {
-            updates.invitesUsedThisWeek = (user.invitesUsedThisWeek || 0) + 1;
-            updates.invitesUsedToday = (user.invitesUsedToday || 0) + 1; 
-        } else {
+        if (limits.invitesPerDay === Infinity) {
+            // Infinite, do nothing
+        } else if (limits.invitesPerDay > 0 && (user.invitesUsedToday || 0) < limits.invitesPerDay) {
             updates.invitesUsedToday = (user.invitesUsedToday || 0) + 1;
             updates.invitesUsedThisWeek = (user.invitesUsedThisWeek || 0) + 1;
+        } else if ((user.bonusInvites || 0) > 0) {
+            updates.bonusInvites = (user.bonusInvites || 0) - 1;
         }
         break;
       case 'UNDO':
-        if ((user.bonusUndos || 0) > 0) {
-            updates.bonusUndos = (user.bonusUndos || 0) - 1;
-        } else {
+        if (limits.undoPerDay === Infinity) {
+            // Infinite
+        } else if (limits.undoPerDay > 0 && (user.undoUsedToday || 0) < limits.undoPerDay) {
             updates.undoUsedToday = (user.undoUsedToday || 0) + 1;
+        } else if ((user.bonusUndos || 0) > 0) {
+            updates.bonusUndos = (user.bonusUndos || 0) - 1;
         }
         break;
       case 'BOOST':
-        if ((user.bonusBoosts || 0) > 0) {
-            updates.bonusBoosts = (user.bonusBoosts || 0) - 1;
-        } else {
+        if (limits.boostPerWeek === Infinity) {
+            // Infinite
+        } else if (limits.boostPerWeek > 0 && (user.boostsUsedThisWeek || 0) < limits.boostPerWeek) {
             updates.boostsUsedThisWeek = (user.boostsUsedThisWeek || 0) + 1;
+        } else if ((user.bonusBoosts || 0) > 0) {
+            updates.bonusBoosts = (user.bonusBoosts || 0) - 1;
         }
         break;
       case 'SUPER_INVITE':
-        if ((user.bonusSuperInvites || 0) > 0) {
-            updates.bonusSuperInvites = (user.bonusSuperInvites || 0) - 1;
-        } else {
+        if (limits.superInvitesPerWeek === Infinity) {
+            // Infinite
+        } else if (limits.superInvitesPerWeek > 0 && (user.superInvitesUsedThisWeek || 0) < limits.superInvitesPerWeek) {
             updates.superInvitesUsedThisWeek = (user.superInvitesUsedThisWeek || 0) + 1;
+        } else if ((user.bonusSuperInvites || 0) > 0) {
+            updates.bonusSuperInvites = (user.bonusSuperInvites || 0) - 1;
         }
         break;
       case 'CREATE_GROUP':
-        updates.groupsCreatedThisMonth = (user.groupsCreatedThisMonth || 0) + 1;
+        if (limits.groupCreationPerMonth !== Infinity) {
+            updates.groupsCreatedThisMonth = (user.groupsCreatedThisMonth || 0) + 1;
+        }
         break;
       case 'UNLOCK_LIKE':
-        if ((user.bonusUnlockLikes || 0) > 0) {
+        if (limits.showLikesDetails) {
+            // Infinite
+        } else if ((user.bonusUnlockLikes || 0) > 0) {
             updates.bonusUnlockLikes = (user.bonusUnlockLikes || 0) - 1;
         }
         break;

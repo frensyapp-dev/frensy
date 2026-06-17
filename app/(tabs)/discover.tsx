@@ -2,20 +2,24 @@ import { FontAwesome } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useNavigation } from 'expo-router';
-import { arrayRemove, arrayUnion, collection, doc, getDocs, onSnapshot, query, serverTimestamp, setDoc, where } from 'firebase/firestore';
+import { arrayRemove, arrayUnion, collection, doc, getDoc, getDocs, onSnapshot, query, serverTimestamp, setDoc, where } from 'firebase/firestore';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, Dimensions, KeyboardAvoidingView, PanResponder, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Animated, Dimensions, KeyboardAvoidingView, PanResponder, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MatchNotification from '../../components/ui/MatchNotification';
 import { useToast } from '../../components/ui/Toast';
 
+import * as Location from 'expo-location';
 import { GroupView } from '../../components/groups/GroupView';
+import { useDialog } from '../../components/ui/Dialog';
 import GlassCard from '../../components/ui/GlassCard';
 import { GradientButton } from '../../components/ui/GradientButton';
 import { Colors } from '../../constants/Colors';
 import { auth, db } from '../../firebaseconfig';
+import { useSubscription } from '../../hooks/useSubscription';
 import { ensureMatchExistsWithLikes } from '../../lib/chat/storage';
-import { getApproxPosition } from '../../lib/location';
+import { hapticSuccess, hapticTap, hapticWarning } from '../../lib/haptics';
+import { getApproxPositionIfGranted } from '../../lib/location';
 import { likeUser } from '../../lib/matches';
 import { performActionUpdates } from '../../lib/monetization';
 import { NearbyUser as NearbyUserPos, subscribeNearbyUsers } from '../../lib/positions';
@@ -34,7 +38,10 @@ type Card = {
 };
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
-const SWIPE_DISTANCE = SCREEN_W * 0.35;
+const MAX_CARD_WIDTH = 500;
+const CARD_WIDTH = Math.min(SCREEN_W - 24, MAX_CARD_WIDTH);
+const SWIPE_DISTANCE = CARD_WIDTH * 0.35;
+const PARIS = { lat: 48.8566, lng: 2.3522 };
 
 const SkeletonCard = () => {
   const anim = useRef(new Animated.Value(0)).current;
@@ -50,12 +57,14 @@ const SkeletonCard = () => {
   const opacity = anim.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.7] });
 
   return (
-    <View style={{ flex: 1, borderRadius: 20, overflow: 'hidden', backgroundColor: '#1a1a1a', margin: 10 }}>
-       <Animated.View style={{ flex: 1, backgroundColor: '#333', opacity }} />
-       <View style={{ position: 'absolute', bottom: 40, left: 20 }}>
-           <Animated.View style={{ width: 180, height: 32, backgroundColor: '#333', borderRadius: 8, marginBottom: 12, opacity }} />
-           <Animated.View style={{ width: 120, height: 20, backgroundColor: '#333', borderRadius: 8, opacity }} />
-       </View>
+    <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+      <View style={{ width: CARD_WIDTH, height: Math.min(SCREEN_H * 0.60, CARD_WIDTH * 1.3), borderRadius: 20, overflow: 'hidden', backgroundColor: '#1a1a1a' }}>
+         <Animated.View style={{ flex: 1, backgroundColor: '#333', opacity }} />
+         <View style={{ position: 'absolute', bottom: 40, left: 20 }}>
+             <Animated.View style={{ width: 180, height: 32, backgroundColor: '#333', borderRadius: 8, marginBottom: 12, opacity }} />
+             <Animated.View style={{ width: 120, height: 20, backgroundColor: '#333', borderRadius: 8, opacity }} />
+         </View>
+      </View>
     </View>
   );
 };
@@ -71,7 +80,6 @@ export default function DiscoverScreen() {
   const [photosByUid, setPhotosByUid] = useState<Record<string, string[] | undefined>>({});
   const [profileByUid, setProfileByUid] = useState<Record<string, UserProfile | undefined>>({});
   const [currentPhotoIdxByUid, setCurrentPhotoIdxByUid] = useState<Record<string, number>>({});
-  const [preloadedImages, setPreloadedImages] = useState<Set<string>>(new Set());
   const [viewerOpen, setViewerOpen] = useState(false);
   const [viewerUri, setViewerUri] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -84,6 +92,7 @@ export default function DiscoverScreen() {
   const modeAnim = useRef(new Animated.Value(0)).current; // 0 = swipe, 1 = groups
 
   const { showToast } = useToast();
+  const { alert } = useDialog();
   const navigation = useNavigation();
 
   useEffect(() => {
@@ -131,7 +140,7 @@ export default function DiscoverScreen() {
             const check = performActionUpdates(profile, 'UNDO');
             if (!check.allowed) {
                 if (check.reason === 'insufficient_coins') {
-                    Alert.alert(
+                    alert(
                         'Pins insuffisants', 
                         'Achetez des pins pour annuler ce swipe.',
                         [
@@ -140,7 +149,7 @@ export default function DiscoverScreen() {
                         ]
                     );
                 } else if (check.reason === 'subscription_required') {
-                     Alert.alert(
+                     alert(
                         'Abonnement requis', 
                         'Passez à Frensy PLUS pour annuler vos swipes, ou utilisez des pins.',
                         [
@@ -171,7 +180,7 @@ export default function DiscoverScreen() {
             };
 
             if (check.cost && check.cost > 0) {
-                 Alert.alert(
+                 alert(
                     'Annuler le swipe',
                     `Utiliser ${check.cost} pins pour annuler ?`,
                     [
@@ -205,7 +214,7 @@ export default function DiscoverScreen() {
     const check = performActionUpdates(myProfile, 'BOOST');
     if (!check.allowed) {
          if (check.reason === 'insufficient_coins') {
-             Alert.alert('Pins insuffisants', 'Achetez des pins pour booster votre profil !', [
+             alert('Pins insuffisants', 'Achetez des pins pour booster votre profil !', [
                  { text: 'Annuler', style: 'cancel' },
                  { text: 'Boutique', onPress: () => router.push({ pathname: '/store', params: { tab: 'coins' } } as any) }
              ]);
@@ -219,7 +228,7 @@ export default function DiscoverScreen() {
         ? `Utiliser ${check.cost} pins pour un boost de 10 minutes ?`
         : `Utiliser un boost gratuit ?`;
 
-    Alert.alert('Booster le profil', confirmMessage, [
+    alert('Booster le profil', confirmMessage, [
         { text: 'Annuler', style: 'cancel' },
         { 
             text: 'Booster 🚀', 
@@ -258,8 +267,39 @@ export default function DiscoverScreen() {
     (async () => {
       try {
         setLoading(true);
-        const pos = await getApproxPosition();
-        setMe({ lat: pos.lat, lng: pos.lng });
+        const uid = auth.currentUser?.uid;
+        if (!uid) return;
+        const snap = await getDoc(doc(db, 'positions', uid));
+        if (snap.exists()) {
+          const d: any = snap.data();
+          const now = Date.now();
+          const rawExp = d?.manualBaseExpiresAt;
+          const expMs =
+            typeof rawExp === 'number' ? rawExp :
+            rawExp?.toMillis ? rawExp.toMillis() :
+            0;
+          const hasBase = typeof d?.baseLat === 'number' && typeof d?.baseLng === 'number' && expMs > now;
+          const isFresh = d?.updatedAtMs && (now - d.updatedAtMs < 10 * 60 * 1000);
+
+          if (isFresh && typeof d?.lat === 'number' && typeof d?.lng === 'number') {
+            setMe({ lat: d.lat, lng: d.lng });
+          } else if (hasBase) {
+            setMe({ lat: d.baseLat, lng: d.baseLng });
+          } else if (typeof d?.lat === 'number' && typeof d?.lng === 'number') {
+            setMe({ lat: d.lat, lng: d.lng });
+          } else {
+            setMe(PARIS);
+          }
+        } else {
+          const perm = await Location.getForegroundPermissionsAsync();
+          if (perm.status === 'granted') {
+            const local = await getApproxPositionIfGranted();
+            if (local) setMe({ lat: local.lat, lng: local.lng });
+            else setMe(PARIS);
+          } else {
+            setMe(PARIS);
+          }
+        }
       } catch (e) {
         console.warn('Location error', e);
         showToast('Erreur de localisation', 'Impossible de récupérer votre position. Vérifiez vos paramètres.', 'error');
@@ -288,7 +328,14 @@ export default function DiscoverScreen() {
             const partner = Array.isArray(data?.users) ? data.users.find((u: string) => u !== uid) : null;
             if (partner) s.add(partner);
           });
-          excludeRef.current.matches = s;
+          
+          // Stabilisation : Ne mettre à jour que si les IDs ont changé
+          const next = Array.from(s).sort();
+          const prev = Array.from(excludeRef.current.matches).sort();
+          if (next.length !== prev.length || next.some((v, i) => v !== prev[i])) {
+            excludeRef.current.matches = s;
+            setRefreshTick(v => v + 1); // Déclencher un refresh des cards si nécessaire
+          }
         }, (err) => { if (err.code !== 'permission-denied') console.warn('Matches sync error', err); });
         const qInvOut = query(collection(db, 'chatRequests'), where('from', '==', uid), where('status', '==', 'pending'));
         const qInvIn = query(collection(db, 'chatRequests'), where('to', '==', uid), where('status', '==', 'pending'));
@@ -353,8 +400,6 @@ export default function DiscoverScreen() {
       try { meUid = (await import('firebase/auth')).getAuth().currentUser?.uid || undefined; } catch {}
       const filtered = users.filter(u => u.id !== meUid);
       setNearby(filtered);
-      // Arrêter l’animation de rafraîchissement dès qu’une mise à jour arrive
-      // if (refreshing) setRefreshing(false);
     });
     return () => { try { unsub(); } catch {} };
   }, [me, radiusKm, refreshTick, refreshing]);
@@ -363,8 +408,27 @@ export default function DiscoverScreen() {
     try {
       setRefreshing(true);
       if (!me) {
-        const pos = await getApproxPosition();
-        setMe({ lat: pos.lat, lng: pos.lng });
+        const uid = auth.currentUser?.uid;
+        if (uid) {
+          const snap = await getDoc(doc(db, 'positions', uid));
+          if (snap.exists()) {
+            const d: any = snap.data();
+            const now = Date.now();
+            const rawExp = d?.manualBaseExpiresAt;
+            const expMs =
+              typeof rawExp === 'number' ? rawExp :
+              rawExp?.toMillis ? rawExp.toMillis() :
+              0;
+            const hasBase = typeof d?.baseLat === 'number' && typeof d?.baseLng === 'number' && expMs > now;
+            if (hasBase) setMe({ lat: d.baseLat, lng: d.baseLng });
+            else if (typeof d?.lat === 'number' && typeof d?.lng === 'number') setMe({ lat: d.lat, lng: d.lng });
+            else setMe(PARIS);
+          } else {
+            setMe(PARIS);
+          }
+        } else {
+          setMe(PARIS);
+        }
       } else {
         setRefreshTick((v) => v + 1);
       }
@@ -377,6 +441,7 @@ export default function DiscoverScreen() {
 
   // Charger et s'abonner au profil de l’utilisateur (tranche d’âge, taille, préférences)
   const [myProfile, setMyProfile] = useState<UserProfile | null>(null);
+  const subscription = useSubscription(myProfile?.subscription);
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
     (async () => {
@@ -454,6 +519,8 @@ export default function DiscoverScreen() {
     let cancelled = false;
     (async () => {
       try {
+        // Accès direct aux states actuels via refs ou calculé à chaque tour
+        // Ici nearby est la seule dépendance externe réelle qui doit déclencher l'effet
         const missing = nearby.map(u => u.id).filter(uid => photosByUid[uid] === undefined || profileByUid[uid] === undefined);
         if (missing.length === 0) return;
         const { getUserProfile } = await import('../../lib/profile');
@@ -503,7 +570,7 @@ export default function DiscoverScreen() {
       } catch {}
     })();
     return () => { cancelled = true; };
-  }, [nearby, photosByUid, profileByUid]);
+  }, [nearby]); // Retrait de photosByUid et profileByUid pour éviter les boucles inutiles
 
   // Recalculer la pile à partir des utilisateurs proches et des photos
   useEffect(() => {
@@ -516,26 +583,16 @@ export default function DiscoverScreen() {
       })
       .filter(u => {
         const p = profileByUid[u.id];
-        // Profil doit exister et contenir au moins une photo utile
+        // Profil doit exister, ne pas être supprimé et contenir au moins une photo utile
         const imgs = photosByUid[u.id] ?? [];
-        return !!p && imgs.length > 0;
+        return !!p && !(p as any).deleted && imgs.length > 0;
       });
 
     // Filtre d’âge (strict) côté viewer uniquement
-    const myAge = myProfile?.age;
-    
-    const subscription = myProfile?.subscription || 'FREE';
     
     // Safety override: Everyone must be 18+
     let minA = typeof myProfile?.desiredMinAge === 'number' ? myProfile!.desiredMinAge! : 18;
     let maxA = typeof myProfile?.desiredMaxAge === 'number' ? myProfile!.desiredMaxAge! : undefined;
-
-    if (subscription === 'FREE') {
-        // Enforce +/- 10 years for free users to prevent 18/50 mix
-        const myAge = myProfile?.age ?? 18;
-        minA = Math.max(18, myAge - 10);
-        maxA = myAge + 10;
-    } 
 
     // Enforce minimum 18
     minA = Math.max(minA ?? 18, 18);
@@ -548,17 +605,14 @@ export default function DiscoverScreen() {
 
           // Utiliser l’âge depuis le profil (plus fiable que positions)
           const a = (partnerProfile.age ?? null) as number | null;
-          
-          if (typeof a !== 'number') return false; // Missing age = exclude
 
-          // Double check: strict barrier (everyone must be 18+)
-          if (a < 18) return false;
+          if (typeof a === 'number') {
+            if (a < 18) return false;
 
-          // Preference filter
-          // For FREE/PLUS users, minA/maxA are undefined (except for strict safety bounds), so this check is skipped
-          if (subscription === 'PRO') {
-              if (typeof minA === 'number' && a < minA) return false;
-              if (typeof maxA === 'number' && a > maxA) return false;
+            if (typeof minA === 'number' && a < minA) return false;
+            if (typeof maxA === 'number' && a > maxA) return false;
+          } else {
+            if (partnerProfile.ageLock !== 'adult') return false;
           }
 
           // Strict Filters (PLUS or PRO)
@@ -607,7 +661,7 @@ export default function DiscoverScreen() {
     // Réinitialiser l’état associé aux nouvelles cartes
     const nextIdx: Record<string, number> = {};
     for (const c of cards) nextIdx[c.uid] = 0;
-    setCurrentPhotoIdxByUid(prev => ({ ...nextIdx }));
+    setCurrentPhotoIdxByUid(nextIdx);
 
     // Préchargement des images des 3 premières cartes
     const toPreload: string[] = [];
@@ -645,7 +699,7 @@ export default function DiscoverScreen() {
         
         if (!check.allowed) {
             if (check.reason === 'insufficient_coins') {
-                Alert.alert(
+                alert(
                     'Pins insuffisants', 
                     'Vous n\'avez pas assez de pins pour envoyer une invitation. Achetez des pins ou abonnez-vous !',
                     [
@@ -654,7 +708,7 @@ export default function DiscoverScreen() {
                     ]
                 );
             } else if (check.reason === 'subscription_required') {
-                Alert.alert(
+                alert(
                     'Abonnement recommandé', 
                   'Passez à Frensy PLUS pour des invitations quotidiennes, ou utilisez des pins.',
                   [
@@ -666,12 +720,15 @@ export default function DiscoverScreen() {
                  showToast('Limite atteinte', 'Vous avez atteint votre limite d\'invitations pour aujourd\'hui.', 'warning');
              }
              // Reset card position since action is blocked
+             hapticWarning();
              Animated.spring(pan, { toValue: { x: 0, y: 0 }, useNativeDriver: true }).start();
              return; // Stop swipe
          }
      }
  
      // Fluidité améliorée: Spring animation pour la sortie
+    if (dir === 'right') hapticSuccess();
+    else hapticTap();
     Animated.spring(pan, {
       toValue: { x: dir === 'right' ? SCREEN_W * 1.5 : -SCREEN_W * 1.5, y: 0 },
       friction: 9,
@@ -718,7 +775,7 @@ export default function DiscoverScreen() {
       if (msg.startsWith('ACTION_DENIED')) {
           const reason = msg.split(':')[1];
           if (reason === 'insufficient_coins') {
-               Alert.alert(
+               alert(
                   'Pins insuffisants', 
                   'Vous n\'avez pas assez de pins pour envoyer une invitation. Achetez des pins ou abonnez-vous !',
                   [
@@ -727,7 +784,7 @@ export default function DiscoverScreen() {
                   ]
                );
           } else if (reason === 'subscription_required') {
-              Alert.alert(
+              alert(
                   'Abonnement recommandé', 
                   'Passez à Frensy PLUS pour des invitations quotidiennes, ou utilisez des pins.',
                   [
@@ -739,6 +796,7 @@ export default function DiscoverScreen() {
               showToast('Limite atteinte', 'Vous avez atteint votre limite d\'invitations pour aujourd\'hui.', 'warning');
           }
       } else if (msg === 'Une invitation en attente existe déjà.') {
+        hapticWarning();
         showToast('Info', msg, 'info');
       }
     }
@@ -929,7 +987,9 @@ export default function DiscoverScreen() {
                 <GlassCard style={[styles.infoOverlayGlass, { backgroundColor: 'rgba(20,20,20,0.75)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)', padding: 16 }]}>
                   <View style={{ marginBottom: 12 }}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
-                      <Text style={[styles.name, { color: '#fff', fontSize: 30, lineHeight: 36 }]}>{top.name}, {top.age}</Text>
+                      <Text style={[styles.name, { color: '#fff', fontSize: 30, lineHeight: 36 }]}>
+                        {top.name}{typeof top.age === 'number' ? `, ${top.age}` : ''}
+                      </Text>
                       {top.accountType === 'group' && (
                         <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#F97316', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 14, borderWidth: 1, borderColor: '#F97316' }}>
                            <FontAwesome name="users" size={14} color="#fff" style={{ marginRight: 6 }} />
@@ -1095,7 +1155,7 @@ export default function DiscoverScreen() {
         <View style={{ height: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
            {viewMode === 'swipe' ? (
              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                <Image source={require('../../assets/images/icon.png')} style={{ width: 40, height: 40 }} resizeMode="contain" />
+                <Image source={require('../../assets/images/icon.png')} style={{ width: 40, height: 40 }} contentFit="contain" />
                 <Text style={{ fontSize: 18, fontWeight: "900", letterSpacing: 3, color: Colors.dark.text }}>F R E N S Y</Text>
              </View>
            ) : (
@@ -1143,7 +1203,7 @@ export default function DiscoverScreen() {
         <Image
            source={require('../../assets/images/frensylogo.png')}
            style={{ width: 100, height: 30 }} 
-           resizeMode="contain" 
+           contentFit="contain" 
         />
       </View>
       )}
@@ -1208,9 +1268,19 @@ export default function DiscoverScreen() {
   const styles = StyleSheet.create({
     container: { flex: 1 },
     // Limiter la hauteur pour éviter que la carte prenne tout l’écran sur petits appareils
-    deckArea: { flex: 1, position: 'relative', justifyContent: 'center', alignItems: 'center', paddingHorizontal: 12, marginTop: 40, marginBottom: 20, height: Math.min(SCREEN_H * 0.60, (SCREEN_W - 24) * 1.3) },
+    deckArea: { 
+      flex: 1, 
+      position: 'relative', 
+      justifyContent: 'center', 
+      alignItems: 'center', 
+      marginTop: 40, 
+      marginBottom: 20, 
+      width: CARD_WIDTH,
+      alignSelf: 'center',
+      height: Math.min(SCREEN_H * 0.60, CARD_WIDTH * 1.3) 
+    },
     card: { position: 'absolute', width: '100%', height: '100%', borderRadius: 32, overflow: 'hidden', backgroundColor: Colors.dark.card, shadowColor: "#000", shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.4, shadowRadius: 20, elevation: 15 },
-    photo: { width: '100%', height: '100%', resizeMode: 'cover' },
+    photo: { width: '100%', height: '100%' },
     // Preload next image (hidden)
     preload: { width: 0, height: 0, opacity: 0 },
     frame: { position: 'absolute', inset: 0, borderWidth: 4, borderRadius: 32 },

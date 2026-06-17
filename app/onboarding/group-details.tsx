@@ -1,12 +1,13 @@
-import { View, Text, StyleSheet, TouchableOpacity, BackHandler, Dimensions, Pressable } from 'react-native';
-import { useEffect, useState } from 'react';
-import { auth } from '../../firebaseconfig';
-import { savePartialProfile } from '../../lib/profile';
-import { router, Stack } from 'expo-router';
-import { Colors } from '../../constants/Colors';
-import { GradientButton } from '../../components/ui/GradientButton';
+import { FontAwesome5 } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { FontAwesome5, Ionicons } from '@expo/vector-icons';
+import { router, Stack } from 'expo-router';
+import { useEffect, useState } from 'react';
+import { BackHandler, Dimensions, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { GradientButton } from '../../components/ui/GradientButton';
+import { Colors } from '../../constants/Colors';
+import { auth } from '../../firebaseconfig';
+import { DEFAULT_MAX_GROUP_MEMBERS } from '../../lib/groups/repo';
+import { savePartialProfile } from '../../lib/profile';
 
 const { width } = Dimensions.get('window');
 
@@ -65,10 +66,14 @@ export default function GroupDetailsStep() {
           </View>
 
           <TouchableOpacity 
-            onPress={() => setValue(Math.min(10, value + 1))}
-            style={s.controlBtn}
+            onPress={() => {
+              if (totalMembers >= DEFAULT_MAX_GROUP_MEMBERS) return;
+              setValue(value + 1);
+            }}
+            style={[s.controlBtn, totalMembers >= DEFAULT_MAX_GROUP_MEMBERS && s.controlBtnDisabled]}
+            disabled={totalMembers >= DEFAULT_MAX_GROUP_MEMBERS}
           >
-             <FontAwesome5 name="plus" size={14} color="#fff" />
+             <FontAwesome5 name="plus" size={14} color={totalMembers >= DEFAULT_MAX_GROUP_MEMBERS ? '#666' : '#fff'} />
           </TouchableOpacity>
        </View>
     </View>
@@ -86,7 +91,7 @@ export default function GroupDetailsStep() {
             <View style={s.content}>
                 <Text style={s.stepIndicator}>Étape 1b sur 5</Text>
                 <Text style={s.title}>Composition du groupe</Text>
-                <Text style={s.subtitle}>Indiquez combien vous êtes dans le groupe.</Text>
+                <Text style={s.subtitle}>Indiquez combien vous êtes dans le groupe. Maximum {DEFAULT_MAX_GROUP_MEMBERS} personnes.</Text>
                 
                 <View style={s.countersContainer}>
                     <Counter label="Garçons" icon="male" value={males} setValue={setMales} />
@@ -98,6 +103,9 @@ export default function GroupDetailsStep() {
                    <Text style={s.summaryText}>Total : {totalMembers} personnes</Text>
                    {!canContinue && totalMembers > 0 && (
                      <Text style={s.errorText}>Minimum 2 personnes requises</Text>
+                   )}
+                   {totalMembers >= DEFAULT_MAX_GROUP_MEMBERS && (
+                     <Text style={s.errorText}>Maximum {DEFAULT_MAX_GROUP_MEMBERS} personnes</Text>
                    )}
                 </View>
             </View>
@@ -116,7 +124,15 @@ export default function GroupDetailsStep() {
 }
 
 const s = StyleSheet.create({
-  container: { flex: 1, paddingHorizontal: 24, paddingTop: 60, paddingBottom: 20 },
+  container: { 
+    flex: 1, 
+    paddingHorizontal: 24, 
+    paddingTop: 60, 
+    paddingBottom: 20,
+    width: '100%',
+    maxWidth: 500,
+    alignSelf: 'center',
+  },
   glow: { position: 'absolute', top: -150, right: -100, width: 400, height: 400, borderRadius: 200, backgroundColor: 'rgba(249, 115, 22, 0.1)' },
   content: { flex: 1, marginTop: 40 },
   stepIndicator: { color: '#F97316', fontWeight: '700', fontSize: 14, marginBottom: 16, letterSpacing: 1, textTransform: 'uppercase' },

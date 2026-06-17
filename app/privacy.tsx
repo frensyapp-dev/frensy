@@ -4,6 +4,8 @@ import { Alert, ActivityIndicator, Linking, ScrollView, Switch, Text, TouchableO
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors } from '../constants/Colors';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
+import * as Location from 'expo-location';
+import { startBackgroundTracking, stopBackgroundTracking } from '../lib/backgroundLocation';
 import { deleteEntireUserAccount } from '../lib/deleteAccount';
 import { getConsent, setConsent } from '../lib/consents';
 import { ensurePushPermissionAndSave } from '../lib/notifications';
@@ -14,11 +16,13 @@ export default function PrivacyScreen() {
   const insets = useSafeAreaInsets();
   const [deleting, setDeleting] = useState(false);
   const [locConsent, setLocConsent] = useState(false);
+  const [bgLocConsent, setBgLocConsent] = useState(false);
   const [notifConsent, setNotifConsent] = useState(false);
 
   useEffect(() => {
     (async () => {
       setLocConsent(await getConsent('location'));
+      setBgLocConsent(await getConsent('location_background'));
       setNotifConsent(await getConsent('notifications'));
     })();
   }, []);
@@ -76,11 +80,52 @@ export default function PrivacyScreen() {
             </View>
             <Switch value={locConsent} onValueChange={async (v) => {
               if (v) {
-                Alert.alert('Consentement localisation', "Tu autorises l'utilisation de ta position dans Frensy.", [
-                  { text: 'OK', onPress: async () => { await setConsent('location', true); setLocConsent(true); } }
-                ]);
+                const fg = await Location.requestForegroundPermissionsAsync();
+                if (fg.status !== 'granted') {
+                  Alert.alert('Refusée', 'La localisation n’a pas été autorisée.');
+                  return;
+                }
+                await setConsent('location', true);
+                setLocConsent(true);
               } else {
+                await setConsent('location_background', false);
+                setBgLocConsent(false);
+                try { await stopBackgroundTracking(); } catch {}
                 await setConsent('location', false); setLocConsent(false);
+              }
+            }} />
+          </View>
+
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={{ color: C.text, fontWeight: '700' }}>Localisation en arrière-plan</Text>
+              <Text style={{ color: C.muted }}>Optionnel. Permet de mettre à jour ta position même appli fermée.</Text>
+            </View>
+            <Switch value={bgLocConsent} onValueChange={async (v) => {
+              if (v) {
+                try {
+                  const fg = await Location.requestForegroundPermissionsAsync();
+                  if (fg.status !== 'granted') {
+                    Alert.alert('Refusée', 'La localisation n’a pas été autorisée.');
+                    return;
+                  }
+                  const bg = await Location.requestBackgroundPermissionsAsync();
+                  if (bg.status !== 'granted') {
+                    Alert.alert('Refusée', 'La localisation en arrière-plan n’a pas été autorisée.');
+                    return;
+                  }
+                  await setConsent('location', true);
+                  setLocConsent(true);
+                  await setConsent('location_background', true);
+                  setBgLocConsent(true);
+                  await startBackgroundTracking();
+                } catch (e: any) {
+                  Alert.alert('Erreur', e?.message || 'Impossible d’activer la localisation en arrière-plan.');
+                }
+              } else {
+                await setConsent('location_background', false);
+                setBgLocConsent(false);
+                try { await stopBackgroundTracking(); } catch {}
               }
             }} />
           </View>

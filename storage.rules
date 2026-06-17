@@ -14,24 +14,33 @@ service firebase.storage {
       return request.resource.size < bytes;
     }
 
+    function matchHasUser(matchId, uid) {
+      return firestore.exists(/databases/(default)/documents/matches/$(matchId))
+        && uid in firestore.get(/databases/(default)/documents/matches/$(matchId)).data.users;
+    }
+
+    function isGroupMember(groupId, uid) {
+      return firestore.exists(/databases/(default)/documents/groups/$(groupId)/members/$(uid));
+    }
+
     // Images de chat
     // Sécurité : On vérifie que l'UID de l'utilisateur est présent dans l'ID du match (uidA_uidB)
     match /chats/{matchId}/{file} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() 
-                   && matchId.matches('.*' + request.auth.uid + '.*')
-                   && isImage() 
+      allow read: if isSignedIn() && matchHasUser(matchId, request.auth.uid);
+      allow write: if isSignedIn()
+                   && matchHasUser(matchId, request.auth.uid)
+                   && isImage()
                    && maxSize(15 * 1024 * 1024);
     }
 
     // Images de groupe
     match /groups/{groupId}/{file} {
       allow read: if isSignedIn();
-      allow write: if isSignedIn() && isImage() && maxSize(15 * 1024 * 1024);
+      allow write: if isSignedIn() && isGroupMember(groupId, request.auth.uid) && isImage() && maxSize(15 * 1024 * 1024);
     }
 
     match /users/{uid}/photos/{file} {
-      allow read: if true;
+      allow read: if isSignedIn();
       allow write: if isSignedIn() && request.auth.uid == uid && isImage() && maxSize(15 * 1024 * 1024);
     }
 

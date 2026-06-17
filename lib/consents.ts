@@ -3,7 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { savePartialProfile } from './profile';
 import { auth } from '../firebaseconfig';
 
-type ConsentKey = 'location' | 'notifications';
+type ConsentKey = 'location' | 'notifications' | 'location_background';
 const kConsent = (key: ConsentKey) => `consent:${key}`;
 
 export async function getConsent(key: ConsentKey): Promise<boolean> {

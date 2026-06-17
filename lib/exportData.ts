@@ -3,7 +3,7 @@ import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system';
 // Note: no expo-sharing import; we use web clipboard if available.
 import { auth, db } from '../firebaseconfig';
-import { collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, limit, orderBy, query, where } from 'firebase/firestore';
 
 type ExportResult = { fileUri?: string; content?: string; size?: number };
 
@@ -44,9 +44,15 @@ export async function exportMyData(): Promise<ExportResult> {
     for (const d of snap.docs) {
       const match: any = { id: d.id, ...d.data(), messages: [], status: [] };
       try {
-        const msgs = await getDocs(collection(db, 'matches', d.id, 'messages'));
+        const qMsgs = query(
+          collection(db, 'matches', d.id, 'messages'),
+          orderBy('createdAt', 'desc'),
+          limit(200)
+        );
+        const msgs = await getDocs(qMsgs);
         const list = msgs.docs.map((m) => ({ id: m.id, ...m.data() }));
-        match.messages = list.slice(-200); // par sécurité
+        list.reverse();
+        match.messages = list;
       } catch {}
       try {
         const stats = await getDocs(collection(db, 'matches', d.id, 'status'));

@@ -25,10 +25,13 @@ expo-env.d.ts
 npm-debug.*
 yarn-debug.*
 yarn-error.*
+.eas_build_view.json
+.eas_build_view.err.txt
 
 # macOS
 .DS_Store
 *.pem
+*.zip
 
 # local env files
 .env*.local

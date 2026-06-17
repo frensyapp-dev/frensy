@@ -1,24 +1,51 @@
 {
   "cli": {
     "version": ">= 10.0.0",
-    "appVersionSource": "remote"
+    "appVersionSource": "remote",
+    "requireCommit": true
   },
   "build": {
     "development": {
       "developmentClient": true,
       "distribution": "internal",
+      "cache": {
+        "key": "pods-2026-03-18"
+      },
       "ios": {
         "simulator": true
       }
     },
+    "development-device": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "cache": {
+        "key": "pods-2026-03-18"
+      },
+      "ios": {
+        "simulator": false
+      }
+    },
     "preview": {
-      "distribution": "internal"
+      "distribution": "internal",
+      "cache": {
+        "key": "pods-2026-03-18"
+      }
     },
     "production": {
-      "autoIncrement": true
+      "autoIncrement": true,
+      "cache": {
+        "key": "pods-2026-03-18"
+      },
+      "ios": {
+        "image": "sdk-54"
+      }
     }
   },
   "submit": {
-    "production": {}
+    "production": {
+      "ios": {
+        "ascAppId": "6759319793"
+      }
+    }
   }
 }

@@ -17,9 +17,10 @@ type Props = {
   onSelect: (u: NearbyUser) => void;
   self?: { lat: number; lng: number; img?: string; focusX?: number; focusY?: number; zoom?: number } | null;
   radiusKm?: number;
+  dailyBase?: { lat: number; lng: number } | null;
 };
 
-export default function NativeMapWeb({ style, C, nearby, onSelect, self }: Props) {
+export default function NativeMapWeb({ style, C, nearby, onSelect, self, dailyBase }: Props) {
   return (
     <View style={[style, { borderTopWidth: 1, borderBottomWidth: 1, borderColor: C.border }]}> 
       <View style={[styles.banner, { borderColor: C.border, backgroundColor: 'rgba(0,0,0,0.04)' }]}> 
@@ -28,6 +29,11 @@ export default function NativeMapWeb({ style, C, nearby, onSelect, self }: Props
         {self && (
           <Text style={{ fontSize: 12, color: C.text }}>
             Votre statut: localisation active
+          </Text>
+        )}
+        {dailyBase && (
+          <Text style={{ fontSize: 12, color: '#3BA55D', fontWeight: '700' }}>
+            Zone journalière active
           </Text>
         )}
       </View>

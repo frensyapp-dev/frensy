@@ -1,52 +1,58 @@
-import MultiSlider from '@ptomasroos/react-native-multi-slider';
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-    ActivityIndicator,
-    Alert,
-    Animated,
-    Easing,
-    ImageStyle,
-    Keyboard,
-    Modal,
-    PanResponder,
-    Platform,
-    Pressable,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextStyle,
-    TouchableOpacity,
-    View,
-    ViewStyle
+  ActivityIndicator,
+  Animated,
+  Easing,
+  ImageStyle,
+  Keyboard,
+  KeyboardAvoidingView,
+  Linking,
+  Modal,
+  PanResponder,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TextStyle,
+  TouchableOpacity,
+  View,
+  ViewStyle
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 // Map native désactivée en web: import dynamique dans le rendu ci-dessous
 import NativeMap from "@/components/map/NativeMap";
+import MultiSlider from '@ptomasroos/react-native-multi-slider';
+import { useFocusEffect, useIsFocused } from "@react-navigation/native";
 import { BlurView } from 'expo-blur';
 import * as Haptics from "expo-haptics";
 import { Image } from "expo-image";
 import { router, useLocalSearchParams } from "expo-router";
-import DailyLocationPrompt from "../../components/DailyLocationPrompt";
 import GlassCard from "../../components/ui/GlassCard";
 
 import * as Location from 'expo-location';
 
 import FontAwesome from '@expo/vector-icons/FontAwesome';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import dayjs from 'dayjs';
 import 'dayjs/locale/fr';
-import { collection, doc, getDoc, getDocs, onSnapshot, query, where, writeBatch } from "firebase/firestore";
-import { KeyboardAvoidingView, TextInput } from "react-native";
+import { collection, doc, getDoc, getDocs, onSnapshot, query, serverTimestamp, updateDoc, where, writeBatch } from "firebase/firestore";
 import Logo from "../../assets/images/icon.png";
+import Avatar from "../../components/ui/Avatar";
+import { useDialog } from "../../components/ui/Dialog";
+import { SafetyInfoModal } from "../../components/ui/SafetyInfoModal";
 import { useToast } from "../../components/ui/Toast";
 import { Colors } from "../../constants/Colors";
 import { auth, db } from "../../firebaseconfig";
+import { useOutgoingInvites } from "../../hooks/useOutgoingInvites";
+import { useSubscription } from "../../hooks/useSubscription";
 import { sendInvitation as sendInvitationApi } from "../../lib/invitations";
-import { getApproxPosition, getPrecisePosition } from "../../lib/location";
+import { getApproxPositionIfGranted, getPrecisePosition } from "../../lib/location";
 import { getMatchId } from "../../lib/matches";
 import { FEATURE_COSTS, performActionUpdates } from "../../lib/monetization";
-import { NearbyUser as NearbyUserPos, subscribeNearbyUsers } from "../../lib/positions";
-import { getUserProfile, userPrivateRef } from "../../lib/profile";
+import { NearbyUser as NearbyUserPos, setDailyLocation, startRealtimePositionTracking, subscribeNearbyUsers } from "../../lib/positions";
+import { getUserProfile, userPrivateRef, type UserProfile } from "../../lib/profile";
+import { syncRevenueCatPurchases } from "../../lib/revenuecat";
 dayjs.locale('fr');
 
 type Region = { latitude: number; longitude: number; latitudeDelta: number; longitudeDelta: number };
@@ -61,6 +67,15 @@ type NearbyUser = {
   img?: string;
   isBlur?: boolean;
   isOnline?: boolean;
+};
+
+type CachedProfile = {
+  img?: string;
+  name?: string;
+  deleted?: boolean;
+  age?: number;
+  genderIdentity?: UserProfile['genderIdentity'];
+  interests?: UserProfile['interests'];
 };
 
 const PARIS = { latitude: 48.8566, longitude: 2.3522 };
@@ -87,7 +102,14 @@ function getRandomOffset(id: string, lat: number, lng: number, radiusMeters: num
   return { lat: lat + dLat, lng: lng + dLng };
 }
 
-import { useOutgoingInvites } from "../../hooks/useOutgoingInvites";
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const toRad = (v: number) => (v * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
 
 export default function HomeScreen() {
   const scheme = 'dark';
@@ -97,6 +119,8 @@ export default function HomeScreen() {
   const { hasPendingInvite } = useOutgoingInvites();
 
   const [loading, setLoading] = useState(true);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  // Suppression des states de filtrage manuel
   const [region, setRegion] = useState<Region>({
     latitude: PARIS.latitude,
     longitude: PARIS.longitude,
@@ -104,11 +128,15 @@ export default function HomeScreen() {
     longitudeDelta: 0.04
 });
   const [me, setMe] = useState<{ lat: number; lng: number } | null>(null);
+  const [myFilters, setMyFilters] = useState<{ interests: string[]; minAge: number; maxAge: number; genders: string[]; useStrict: boolean }>({
+     interests: [], minAge: 18, maxAge: 100, genders: [], useStrict: false
+  });
   const [mePrecise, setMePrecise] = useState<{ lat: number; lng: number } | null>(null);
   const [myAvatar, setMyAvatar] = useState<string | undefined>(undefined);
   const [myFocusX, setMyFocusX] = useState<number>(0.5);
   const [myFocusY, setMyFocusY] = useState<number>(0.5);
   const [myZoom, setMyZoom] = useState<number>(1);
+  const mySubscription = useSubscription(profile?.subscription);
   const [selected, setSelected] = useState<NearbyUser | null>(null);
   const [clusterSel, setClusterSel] = useState<NearbyUser[] | null>(null);
   const [inviteModalVisible, setInviteModalVisible] = useState(false);
@@ -117,10 +145,20 @@ export default function HomeScreen() {
   const [hasMatch, setHasMatch] = useState(false);
   // inviteStatus is now derived from hasPendingInvite
   const { showToast } = useToast();
+  const { alert } = useDialog();
   const [clusterStatuses, setClusterStatuses] = useState<Record<string, { online: boolean; last: number | null }>>({});
   const [inviteTarget, setInviteTarget] = useState<NearbyUser | null>(null);
   const [isGoldInvite, setIsGoldInvite] = useState(false);
   const keyboardHeight = useRef(new Animated.Value(0)).current;
+  const stopTrackingRef = useRef<(() => void) | null>(null);
+  const mapSessionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mapSessionUntilMsRef = useRef(0);
+  const [mapSessionActive, setMapSessionActive] = useState(false);
+  const mapSessionActiveRef = useRef(false);
+
+  useEffect(() => {
+    mapSessionActiveRef.current = mapSessionActive;
+  }, [mapSessionActive]);
 
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
@@ -201,7 +239,7 @@ export default function HomeScreen() {
                 // Use setTimeout to avoid Modal/Alert conflict causing crash
                 setTimeout(() => {
                     if (check.reason === 'insufficient_coins') {
-                        Alert.alert(
+                        alert(
                             'Pins insuffisants',
                             'Vous n\'avez pas assez de pins pour envoyer une invitation.',
                             [
@@ -210,7 +248,7 @@ export default function HomeScreen() {
                             ]
                         );
                     } else if (check.reason === 'subscription_required') {
-                        Alert.alert(
+                        alert(
                             'Abonnement recommandé', 
                             'Passez à Frensy PLUS pour des invitations quotidiennes, ou utilisez des pins.',
                             [
@@ -243,7 +281,7 @@ export default function HomeScreen() {
           
           setTimeout(() => {
             if (reason === 'insufficient_coins') {
-                 Alert.alert(
+                 alert(
                     'Pins insuffisants', 
                     'Vous n\'avez pas assez de pins pour envoyer une invitation. Achetez des pins ou abonnez-vous !',
                     [
@@ -252,7 +290,7 @@ export default function HomeScreen() {
                     ]
                  );
             } else if (reason === 'subscription_required') {
-                Alert.alert(
+                alert(
                     'Abonnement recommandé', 
                     'Passez à Frensy PLUS pour des invitations quotidiennes, ou utilisez des pins.',
                     [
@@ -299,8 +337,66 @@ const pan = useRef(PanResponder.create({
 })).current;
 const [rawNearbyUsers, setRawNearbyUsers] = useState<NearbyUserPos[]>([]);
   const [nearbyAll, setNearbyAll] = useState<NearbyUserPos[]>([]);
-  const [profilesByUid, setProfilesByUid] = useState<Record<string, { img?: string; name?: string; deleted?: boolean } | undefined>>({});
-const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | null }>({ online: false, last: null });
+  const [profilesByUid, setProfilesByUid] = useState<Record<string, CachedProfile | undefined>>({});
+  const [hasDailyBase, setHasDailyBase] = useState(false);
+  const [dailyBaseCoords, setDailyBaseCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [hasDailyRewardAvailable, setHasDailyRewardAvailable] = useState(false);
+  const [showGhostGuide, setShowGhostGuide] = useState(false);
+  const isFocused = useIsFocused();
+  const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | null }>({ online: false, last: null });
+
+  useEffect(() => {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    const unsub = onSnapshot(doc(db, 'positions', uid), (snap) => {
+      const d = snap.data() as any;
+      if (!d) return;
+
+      const now = Date.now();
+      const expires = d.manualBaseExpiresAt || 0;
+      const isActive = d.isManualBase === true && expires > now;
+      setHasDailyBase(isActive);
+      
+      if (isActive && typeof d.baseLat === 'number' && typeof d.baseLng === 'number') {
+        setDailyBaseCoords({ lat: d.baseLat, lng: d.baseLng });
+      } else {
+        setDailyBaseCoords(null);
+      }
+
+      // S'assurer que 'me' suit la position réelle si on est "en ligne"
+      const isFresh = d.updatedAtMs && (now - d.updatedAtMs < 10 * 60 * 1000);
+      if (isFresh && typeof d.lat === 'number' && typeof d.lng === 'number') {
+          // On ne met à jour 'me' que si c'est significatif ou si c'est le premier chargement
+          setMe(prev => {
+              if (!prev) return { lat: d.lat, lng: d.lng };
+              const dist = haversineKm(prev.lat, prev.lng, d.lat, d.lng);
+              if (dist > 0.05) return { lat: d.lat, lng: d.lng }; // 50m
+              return prev;
+          });
+      }
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const val = await (await import('@react-native-async-storage/async-storage')).default.getItem('hasSeenSafetyInfo_v1');
+        const guideSeen = await (await import('@react-native-async-storage/async-storage')).default.getItem('hasSeenGhostGuide_v1');
+        // Show guide if safety info has been seen but guide hasn't
+        if (val === 'true' && !guideSeen) {
+          setShowGhostGuide(true);
+        }
+      } catch {}
+    })();
+  }, [isFocused]);
+
+  const dismissGhostGuide = async () => {
+    try {
+      await (await import('@react-native-async-storage/async-storage')).default.setItem('hasSeenGhostGuide_v1', 'true');
+      setShowGhostGuide(false);
+    } catch {}
+  };
 
   useEffect(() => {
     (async () => {
@@ -340,6 +436,8 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
   }, [clusterSel]);
   const [friendUids, setFriendUids] = useState<string[]>([]);
   const [shareFromUids, setShareFromUids] = useState<string[]>([]);
+  const [shareLiveByUid, setShareLiveByUid] = useState<Record<string, { lat: number; lng: number; updatedAtMs: number; accuracy: number | null }>>({});
+  const [locPermission, setLocPermission] = useState<'unknown' | 'granted' | 'denied'>('unknown');
   const [sharingEnabled, setSharingEnabled] = useState(true);
   const [radiusKm, setRadiusKm] = useState<number>(100);
   const [isRadiusChanging, setIsRadiusChanging] = useState(false);
@@ -363,39 +461,167 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
   const didCenterRef = useRef(false);
   const handledFocusRef = useRef<string | null>(null);
 
+  const refreshDailyRewardAvailability = useCallback(async () => {
+    try {
+      const uid = auth.currentUser?.uid;
+      if (!uid) return;
+
+      const userDoc = await getDoc(doc(db, 'users', uid));
+      if (!userDoc.exists()) {
+        setHasDailyRewardAvailable(false);
+        return;
+      }
+
+      const d = userDoc.data();
+      const rawLastClaim = (d as any).lastDailyRewardClaimedAt;
+      let lastClaim = null as dayjs.Dayjs | null;
+      if (rawLastClaim) {
+        if (typeof rawLastClaim === 'number') {
+          lastClaim = dayjs(rawLastClaim);
+        } else if (typeof (rawLastClaim as any).toMillis === 'function') {
+          lastClaim = dayjs(rawLastClaim.toMillis());
+        } else if (rawLastClaim instanceof Date) {
+          lastClaim = dayjs(rawLastClaim.getTime());
+        }
+      }
+      const now = dayjs();
+      setHasDailyRewardAvailable(!lastClaim || !now.isSame(lastClaim, 'day'));
+    } catch {
+      setHasDailyRewardAvailable(false);
+    }
+  }, []);
+
+  const refreshSelfProfile = useCallback(async () => {
+    try {
+      const uid = auth.currentUser?.uid;
+      if (!uid) return;
+      const p = await getUserProfile(uid);
+      setProfile(p);
+      let profileUrl = p?.photos?.find(ph => ph.path === p?.primaryPhotoPath)?.url || p?.photos?.[0]?.url;
+      if (!profileUrl) {
+        const path = p?.primaryPhotoPath || p?.photos?.[0]?.path;
+        if (path) {
+          try {
+            const { getStorage, ref, getDownloadURL } = await import('firebase/storage');
+            const storage = getStorage();
+            profileUrl = await getDownloadURL(ref(storage, path));
+          } catch {}
+        }
+      }
+      const authUrl = (await import("firebase/auth")).getAuth().currentUser?.photoURL || undefined;
+      setMyAvatar(profileUrl || authUrl);
+      setMyFocusX(typeof p?.avatarFocusX === 'number' ? p.avatarFocusX : 0.5);
+      setMyFocusY(typeof p?.avatarFocusY === 'number' ? p.avatarFocusY : 0.5);
+      setMyZoom(typeof p?.avatarZoom === 'number' ? p.avatarZoom : 1);
+    } catch {}
+  }, []);
+
+  const refreshHomeSurface = useCallback(async () => {
+    if (auth.currentUser?.uid) {
+      await syncRevenueCatPurchases().catch(() => null);
+    }
+    await Promise.allSettled([
+      refreshDailyRewardAvailability(),
+      refreshSelfProfile(),
+    ]);
+  }, [refreshDailyRewardAvailability, refreshSelfProfile]);
+
+  const endMapSession = useCallback(async () => {
+    if (mapSessionTimerRef.current) {
+      clearTimeout(mapSessionTimerRef.current);
+      mapSessionTimerRef.current = null;
+    }
+    mapSessionUntilMsRef.current = 0;
+    mapSessionActiveRef.current = false;
+    if (stopTrackingRef.current) {
+      try { stopTrackingRef.current(); } catch {}
+      stopTrackingRef.current = null;
+    }
+    setMapSessionActive(false);
+    const uid = auth.currentUser?.uid;
+    if (uid) {
+      try {
+        // Apple Guideline 5.1.2(i): Just hide from map, don't necessarily delete if sharing elsewhere
+        await updateDoc(doc(db, 'positions', uid), {
+          mapVisibleUntilMs: 0,
+          updatedAt: serverTimestamp()
+        });
+      } catch {
+        // doc peut être absent
+      }
+    }
+  }, []);
+
   // Les utilisateurs proches proviennent désormais de Firestore via subscribeNearbyUsers (état `nearby`).
 
-  useEffect(() => {
-    (async () => {
-      try {
-        setLoading(true);
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      void refreshHomeSurface();
 
-        const { status } = await Location.getForegroundPermissionsAsync();
-        if (status === 'undetermined') {
-             await new Promise<void>(resolve => {
-                 Alert.alert(
-                     "Localisation",
-                     "Frendzy utilise ta position pour te montrer les personnes autour de toi.",
-                     [{ text: "Continuer", onPress: () => resolve() }]
-                 );
-             });
+      (async () => {
+        try {
+          setLoading(true);
+
+          const perm = await Location.getForegroundPermissionsAsync();
+          if (perm.status !== 'granted') {
+            if (alive) setLocPermission('denied');
+            return;
+          }
+          if (alive) setLocPermission('granted');
+
+          const pos = await getApproxPositionIfGranted();
+          if (!alive) return;
+
+          if (pos) {
+            setMe({ lat: pos.lat, lng: pos.lng });
+            setMePrecise({ lat: pos.lat, lng: pos.lng }); // S'assurer que notre personnage apparaît direct
+            const nextRegion = {
+              latitude: pos.lat,
+              longitude: pos.lng,
+              latitudeDelta: 0.06,
+              longitudeDelta: 0.03,
+            };
+            didCenterRef.current = false;
+            setRegion(nextRegion);
+            mapRef.current?.animateToRegion(nextRegion, 350);
+          }
+
+          // Apple Compliance: Automatic tracking starts if not in Ghost Mode.
+          // Coordinates are fuzzy (rounded to 0.01) by default in startRealtimePositionTracking.
+          if (sharingEnabled && !stopTrackingRef.current) {
+            try {
+              const stop = await startRealtimePositionTracking();
+              if (!alive) {
+                try { stop(); } catch {}
+                return;
+              }
+              stopTrackingRef.current = stop;
+            } catch (e) {
+              try { if (__DEV__) console.warn('Automatic tracking start error', e); } catch {}
+            }
+          }
+        } catch (e) {
+          try { if (__DEV__) console.warn('Location error', e); } catch {}
+        } finally {
+          if (alive) setLoading(false);
         }
+      })();
 
-        const pos = await getApproxPosition();
-        setMe({ lat: pos.lat, lng: pos.lng });
-        setRegion({
-          latitude: pos.lat,
-          longitude: pos.lng,
-          latitudeDelta: 0.06,
-          longitudeDelta: 0.03
-        });
-      } catch (e) {
-        console.warn("Location error", e);
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, []);
+      return () => {
+        alive = false;
+        if (stopTrackingRef.current) {
+          try { stopTrackingRef.current(); } catch {}
+          stopTrackingRef.current = null;
+        }
+      };
+    }, [refreshHomeSurface, sharingEnabled])
+  );
+
+  useEffect(() => {
+    if (sharingEnabled) return;
+    void endMapSession();
+  }, [sharingEnabled, endMapSession]);
 
   // S’abonner aux matchs pour obtenir la liste d’amis (utilisateurs matchés)
   useEffect(() => {
@@ -412,7 +638,11 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
             const users = (d.data() as any)?.users || [];
             for (const u of users) { if (u !== meUid) others.add(u); }
           });
-          setFriendUids(Array.from(others));
+          const arr = Array.from(others);
+          setFriendUids(prev => {
+            if (prev.length === arr.length && prev.every((v, i) => v === arr[i])) return prev;
+            return arr;
+          });
         });
         return () => { try { unsub(); } catch {} };
       } catch {}
@@ -430,14 +660,44 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
         const q = query(collection(db, 'locationShares'), where('to', '==', meUid));
         const unsub = onSnapshot(q, (snap) => {
           const arr: string[] = [];
+          const live: Record<string, { lat: number; lng: number; updatedAtMs: number; accuracy: number | null }> = {};
           const now = Date.now();
           snap.forEach((d) => {
             const data = d.data() as any;
             const active = data?.active === true && data?.revoked !== true;
             const notExpired = typeof data?.expiresAtMs !== 'number' || data.expiresAtMs > now;
-            if (active && notExpired && typeof data?.from === 'string') arr.push(data.from);
+            if (active && notExpired && typeof data?.from === 'string') {
+              arr.push(data.from);
+              const liveLat = typeof data?.liveLat === 'number' ? data.liveLat : null;
+              const liveLng = typeof data?.liveLng === 'number' ? data.liveLng : null;
+              const liveUpdatedAtMs = typeof data?.liveUpdatedAtMs === 'number' ? data.liveUpdatedAtMs : null;
+              if (liveLat !== null && liveLng !== null && liveUpdatedAtMs !== null) {
+                live[data.from] = {
+                  lat: liveLat,
+                  lng: liveLng,
+                  updatedAtMs: liveUpdatedAtMs,
+                  accuracy: typeof data?.liveAccuracy === 'number' ? data.liveAccuracy : null,
+                };
+              }
+            }
           });
-          setShareFromUids(arr);
+
+          // Stabilisation : Ne mettre à jour que si le contenu a changé
+          setShareFromUids(prev => {
+            if (prev.length === arr.length && prev.every((v, i) => v === arr[i])) return prev;
+            return arr;
+          });
+          setShareLiveByUid(prev => {
+            const prevKeys = Object.keys(prev);
+            const nextKeys = Object.keys(live);
+            if (prevKeys.length !== nextKeys.length) return live;
+            const hasChanged = nextKeys.some(k => {
+              const p = prev[k];
+              const n = live[k];
+              return !p || p.lat !== n.lat || p.lng !== n.lng || p.updatedAtMs !== n.updatedAtMs;
+            });
+            return hasChanged ? live : prev;
+          });
         });
         return () => { try { unsub(); } catch {} };
       } catch {}
@@ -454,6 +714,7 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
         
         const unsub = onSnapshot(doc(db, 'users', uid), (snap) => {
           const data = snap.data() as any;
+        setProfile(prev => prev ? { ...prev, ...data } : data as UserProfile);
         const r = data?.discoveryRadiusKm;
         if (typeof r === 'number' && Number.isFinite(r)) {
           setRadiusKm(r);
@@ -463,6 +724,16 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
         if (typeof fy === 'number' && Number.isFinite(fy)) setMyFocusY(fy);
         const z = data?.avatarZoom;
         if (typeof z === 'number' && Number.isFinite(z)) setMyZoom(z);
+
+        // Charger les préférences de filtrage
+        // Les filtres stricts (intérêts, genre précis) nécessitent un abonnement.
+        setMyFilters({
+            interests: Array.isArray(data?.interests) ? data.interests : [],
+            minAge: typeof data?.desiredMinAge === 'number' ? data.desiredMinAge : 18,
+            maxAge: typeof data?.desiredMaxAge === 'number' ? data.desiredMaxAge : 100,
+            genders: Array.isArray(data?.genders) ? data.genders : [],
+            useStrict: false
+        });
 
         // setSharingEnabled(!data?.ghostMode); // Moved to private listener
           
@@ -491,7 +762,12 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
         const unsubPrivate = onSnapshot(userPrivateRef(uid), (snap) => {
             if (snap.exists()) {
                 const d = snap.data();
+                setProfile(prev => prev ? { ...prev, ...d } : d as UserProfile);
                 setSharingEnabled(!(d?.ghostMode === true));
+                const tier = (d?.subscription === 'PLUS' || d?.subscription === 'PRO' || d?.subscription === 'FREE') ? d.subscription : 'FREE';
+                // Subscription is handled by useSubscription hook
+                const isPremium = tier === 'PLUS' || tier === 'PRO';
+                setMyFilters(prev => ({ ...prev, useStrict: isPremium ? !!d?.useStrictFilters : false }));
             }
         });
 
@@ -514,82 +790,17 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
 
   // Filtrer les utilisateurs (âge, etc.) sans re-souscrire
   useEffect(() => {
+      const meUid = auth.currentUser?.uid;
       const filtered = rawNearbyUsers
-        .filter(u => u.id !== auth.currentUser?.uid);
+        .filter(u => u.id !== meUid)
+        .map((u) => {
+          const live = shareLiveByUid[u.id];
+          if (!live) return u;
+          const d = me ? haversineKm(me.lat, me.lng, live.lat, live.lng) : u.distanceKm;
+          return { ...u, lat: live.lat, lng: live.lng, distanceKm: d, accuracy: live.accuracy ?? (u as any).accuracy, precisionKm: 0.01 } as any;
+        });
       setNearbyAll(filtered);
-  }, [rawNearbyUsers, shareFromUids]);
-
-  // Check Daily Gift (open store once per day, de-duped with index.tsx)
-  useEffect(() => {
-      (async () => {
-         try {
-             const { doc, getDoc } = await import('firebase/firestore');
-             const { auth } = await import('../../firebaseconfig');
-             const dayjs = (await import('dayjs')).default;
-             
-             const uid = auth.currentUser?.uid;
-             if (!uid) return;
-
-             const userDoc = await getDoc(doc(db, 'users', uid));
-             if (userDoc.exists()) {
-                 const d = userDoc.data();
-                 const rawLastClaim = (d as any).lastDailyRewardClaimedAt;
-                 let lastClaim = null as dayjs.Dayjs | null;
-                 if (rawLastClaim) {
-                     if (typeof rawLastClaim === 'number') {
-                         lastClaim = dayjs(rawLastClaim);
-                     } else if (typeof (rawLastClaim as any).toMillis === 'function') {
-                         lastClaim = dayjs(rawLastClaim.toMillis());
-                     } else if (rawLastClaim instanceof Date) {
-                         lastClaim = dayjs(rawLastClaim.getTime());
-                     }
-                 }
-                 const now = dayjs();
-                 
-                 if (!lastClaim || !now.isSame(lastClaim, 'day')) {
-                     const key = `dailyReward:opened:${now.format('YYYY-MM-DD')}`;
-                     const wasOpened = await AsyncStorage.getItem(key);
-                     if (!wasOpened) {
-                        try { await AsyncStorage.setItem(key, '1'); } catch {}
-                        setTimeout(() => { router.push('/store'); }, 250);
-                     }
-                 }
-             }
-         } catch(e) {}
-      })();
-  }, []);
-
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const { auth } = await import("../../firebaseconfig");
-        const uid = auth.currentUser?.uid;
-        if (!uid) return;
-        const { getUserProfile } = await import("../../lib/profile");
-        const p = await getUserProfile(uid);
-        let profileUrl = p?.photos?.find(ph => ph.path === p?.primaryPhotoPath)?.url || p?.photos?.[0]?.url;
-        if (!profileUrl) {
-          const path = p?.primaryPhotoPath || p?.photos?.[0]?.path;
-          if (path) {
-            try {
-              const { getStorage, ref, getDownloadURL } = await import('firebase/storage');
-              const storage = getStorage();
-              profileUrl = await getDownloadURL(ref(storage, path));
-            } catch {}
-          }
-        }
-        const authUrl = (await import("firebase/auth")).getAuth().currentUser?.photoURL || undefined;
-        setMyAvatar(profileUrl || authUrl);
-        setMyFocusX(typeof p?.avatarFocusX === 'number' ? p.avatarFocusX : 0.5);
-        setMyFocusY(typeof p?.avatarFocusY === 'number' ? p.avatarFocusY : 0.5);
-        const precise = await getPrecisePosition();
-        setMePrecise({ lat: precise.lat, lng: precise.lng });
-      } catch {}
-    })();
-  }, []);
-
-  // Le tracking est maintenant géré globalement dans app/(tabs)/_layout.tsx pour persister hors de la home
+  }, [rawNearbyUsers, shareLiveByUid, me]);
 
   // Charger les avatars des amis visibles (position précise uniquement)
   // Séparer: amis dans la zone et amis ayant partagé une position précise
@@ -602,11 +813,68 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
   // Amis précis -> position réelle, net
   // Amis non précis -> position aléatoire, net (mais lieu imprécis)
   // Autres -> position aléatoire, flou
+  const handleSetDailyLocation = async () => {
+    try {
+      const pos = await getPrecisePosition();
+      if (!pos) throw new Error('Impossible de récupérer ta position précise');
+      
+      alert(
+        'Localisation journalière',
+        `Veux-tu définir ce lieu comme ta zone de présence pour aujourd'hui ? Tu resteras visible des personnes à proximité même si tu fermes l'application.`,
+        [
+          { text: 'Annuler', style: 'cancel' },
+          { 
+            text: 'Confirmer', 
+            onPress: async () => {
+              try {
+                setLoading(true);
+                await setDailyLocation(pos.lat, pos.lng);
+                showToast('Succès', 'Ta zone journalière est enregistrée !', 'success');
+              } catch (e: any) {
+                showToast('Erreur', e.message, 'error');
+              } finally {
+                setLoading(false);
+              }
+            }
+          }
+        ]
+      );
+    } catch (e: any) {
+      showToast('Erreur', e.message, 'error');
+    }
+  };
+
   const mapUsers: NearbyUser[] = useMemo(() => {
     const now = Date.now();
     return nearbyAll.map(u => {
+      // Application des filtres utilisateur (Paramètres)
+      // Si l'utilisateur a activé les filtres stricts, on applique tous les critères.
+      // Sinon, on applique uniquement la tranche d'âge de base pour éviter de montrer des profils trop éloignés.
+      
       const p = profilesByUid[u.id];
       if (p?.deleted) return null;
+
+      // Filtrage par âge (toujours appliqué un minimum)
+      const age = u.age || p?.age;
+      if (typeof age === 'number') {
+          if (age < myFilters.minAge || age > myFilters.maxAge) return null;
+      }
+
+      // Filtrage par genre (si spécifié)
+      if (myFilters.genders.length > 0) {
+          // Si le profil n'a pas de genre défini (ancien profil ?), on le garde par défaut sauf en strict
+          const g = p?.genderIdentity;
+          if (g && !myFilters.genders.includes(g)) return null;
+          if (!g && myFilters.useStrict) return null;
+      }
+
+      // Filtrage par intérêts (uniquement si filtres stricts ou si l'utilisateur a des intérêts définis et veut matcher)
+      // Note: Habituellement la map est "découverte large", mais si useStrict est true, on filtre.
+      if (myFilters.useStrict && myFilters.interests.length > 0) {
+          const userInterests = p?.interests || [];
+          const hasMatch = myFilters.interests.some(fi => userInterests.includes(fi));
+          if (!hasMatch) return null;
+      }
 
       // Est-ce un ami qui partage sa position précise ?
       const isFriend = friendUids.includes(u.id);
@@ -638,16 +906,15 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
       // Priorité à l'image venant du doc position (temps réel), sinon fallback sur profil chargé
       const img = u.img || p?.img;
       
-      // Affichage du nom : "Utilisateur" uniquement pour les inconnus (non-amis)
-      // Pour les amis, on veut toujours voir le nom (p?.name ou u.name).
-      // Si le nom est manquant, on met "Ami" au lieu de "Utilisateur" pour distinguer.
+      // Affichage du nom : "Utilisateur" systématiquement pour les inconnus (non-amis)
+      // Seuls les amis voient le vrai nom.
       const rawName = p?.name || u.name;
-      const displayName = isFriend ? (rawName === 'Utilisateur' ? 'Ami' : rawName) : rawName;
+      const displayName = isFriend ? (rawName === 'Utilisateur' ? 'Ami' : rawName) : 'Utilisateur';
 
       return { 
         id: u.id, 
         name: displayName, 
-        age: u.age, 
+        age: isFriend ? (u.age || p?.age) : undefined, // On cache aussi l'âge pour les inconnus par sécurité
         lat, 
         lng, 
         distanceKm: u.distanceKm, 
@@ -656,7 +923,7 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
         isOnline: online
       };
     }).filter(u => u !== null) as NearbyUser[];
-  }, [nearbyAll, friendUids, shareFromUids, profilesByUid]);
+  }, [nearbyAll, friendUids, shareFromUids, profilesByUid, myFilters]);
 
   useEffect(() => {
     let cancelled = false;
@@ -673,7 +940,7 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
         const { getStorage, ref, getDownloadURL } = await import('firebase/storage');
         const storage = getStorage();
 
-        const updates: Record<string, { img?: string; name?: string; deleted?: boolean } | undefined> = {};
+        const updates: Record<string, CachedProfile | undefined> = {};
         for (const uid of missing) {
           try {
             const p = await getUserProfile(uid);
@@ -692,7 +959,13 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
                 } catch {}
               }
             }
-            updates[uid] = { img: url, name: p?.firstName };
+            updates[uid] = {
+              img: url,
+              name: p?.firstName,
+              age: p?.age,
+              genderIdentity: p?.genderIdentity,
+              interests: p?.interests,
+            };
           } catch {}
         }
         if (!cancelled && Object.keys(updates).length > 0) {
@@ -705,8 +978,17 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
       return () => { cancelled = true; };
   }, [nearbyAll, profilesByUid]);
 
-  const recenter = () => {
-    const base = mePrecise ?? me;
+  const recenter = async () => {
+    let base = mePrecise ?? me;
+    if (!base) return;
+    try {
+      const perm = await Location.getForegroundPermissionsAsync();
+      if (perm.status === 'granted') {
+        const precise = await getPrecisePosition();
+        base = { lat: precise.lat, lng: precise.lng };
+        setMePrecise(base);
+      }
+    } catch {}
     if (!mapRef.current || !base) return;
     Haptics.selectionAsync();
     mapRef.current.animateToRegion(
@@ -814,7 +1096,7 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
         nearby={mapUsers as any}
         onSelect={(u: any) => {
   try {
-    setSelected({ id: u.id, name: u.name, age: (u.age ?? 0), lat: u.lat, lng: u.lng, distanceKm: u.distanceKm ?? 0, img: u.img, isBlur: u.isBlur });
+    setSelected({ id: u.id, name: u.name, age: (typeof u.age === 'number' ? u.age : null), lat: u.lat, lng: u.lng, distanceKm: u.distanceKm ?? 0, img: u.img, isBlur: u.isBlur });
     fadeAnim.setValue(0);
     Animated.parallel([
       Animated.timing(sheetAnim, { toValue: 1, duration: 300, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
@@ -826,7 +1108,7 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
         radiusKm={radiusKm}
         onClusterSelect={(users: NearbyUser[]) => {
           try {
-            setClusterSel(users.map((u: NearbyUser) => ({ ...(u as any), img: profilesByUid[u.id]?.img })) as any);
+            setClusterSel(users.map((u: NearbyUser) => ({ ...(u as any), img: u.img || profilesByUid[u.id]?.img })) as any);
             fadeAnim.setValue(0);
             Animated.parallel([
               Animated.timing(sheetAnim, { toValue: 1, duration: 300, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
@@ -834,9 +1116,90 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
             ]).start();
           } catch {}
         }}
+        logoEnabled={false}
+        rotateEnabled={true}
+        pitchEnabled={true}
+        dailyBase={dailyBaseCoords}
+        subscription={mySubscription}
       />
 
       <GlassCard style={s.hudGlass}> 
+        {locPermission === 'denied' ? (
+          <View style={{ width: '100%', gap: 10, marginBottom: 12 }}>
+            <Text style={{ color: C.text, fontWeight: '800', textAlign: 'center' }}>Localisation</Text>
+            <Text style={{ color: C.muted, textAlign: 'center' }}>
+              Frensy a besoin de ta position pour centrer la carte et, si tu le choisis, pour un pointage manuel sur la carte des personnes à proximité.
+            </Text>
+            <TouchableOpacity
+              accessibilityRole="button"
+              accessibilityLabel="Continuer vers la demande de localisation du système"
+              onPress={async () => {
+                setLoading(true);
+                try {
+                  const req = await Location.requestForegroundPermissionsAsync();
+                  if (req.status !== 'granted') {
+                    setLocPermission('denied');
+                    if (req.canAskAgain === false) {
+                      try { await Linking.openSettings(); } catch {}
+                    }
+                    return;
+                  }
+                  setLocPermission('granted');
+                  const pos = await getApproxPositionIfGranted();
+                  if (pos) {
+                    setMe({ lat: pos.lat, lng: pos.lng });
+                    setMePrecise({ lat: pos.lat, lng: pos.lng });
+                    setRegion({
+                      latitude: pos.lat,
+                      longitude: pos.lng,
+                      latitudeDelta: 0.06,
+                      longitudeDelta: 0.03,
+                    });
+                  }
+                } catch (e) {
+                  try { if (__DEV__) console.warn(e); } catch {}
+                } finally {
+                  setLoading(false);
+                }
+              }}
+              style={{
+                borderRadius: 16,
+                paddingVertical: 10,
+                paddingHorizontal: 14,
+                backgroundColor: 'rgba(255,255,255,0.08)',
+                borderWidth: 1,
+                borderColor: 'rgba(255,255,255,0.10)',
+                alignItems: 'center',
+              }}
+            >
+              <Text style={{ color: C.text, fontWeight: '900' }}>Continuer</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
+        {locPermission === 'granted' && !sharingEnabled ? (
+          <View style={{ width: '100%', gap: 8, marginBottom: 12 }}>
+            <Text style={{ color: C.muted, textAlign: 'center', fontSize: 13 }}>
+              Mode fantôme actif : tu es invisible sur la carte. Désactive l’icône 👻 pour réapparaître.
+            </Text>
+          </View>
+        ) : null}
+        {locPermission === 'granted' && sharingEnabled ? (
+          <View style={{ width: '100%', gap: 8, marginBottom: 12 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+              <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#3BA55D' }} />
+              <Text style={{ color: C.text, fontWeight: '700', fontSize: 13 }}>Visibilité automatique active</Text>
+            </View>
+            <Text style={{ color: C.muted, textAlign: 'center', fontSize: 12 }}>
+              Ta position approximative est visible des personnes à proximité.
+            </Text>
+            {hasDailyBase && (
+               <View style={{ marginTop: 4, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                  <Text style={{ color: '#3BA55D', fontSize: 11, fontWeight: '600' }}>Zone journalière active</Text>
+                  <FontAwesome name="check-circle" size={10} color="#3BA55D" />
+               </View>
+            )}
+          </View>
+        ) : null}
         <Text style={[s.hudCount, { color: C.tint }]}>{nearbyAll.length}</Text>
         <Text style={[s.hudText, { color: C.text }]}>personnes autour de toi</Text>
         <View style={s.hudRow}> 
@@ -845,14 +1208,89 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Informations sur la localisation"
-            onPress={() => Alert.alert(
+            onPress={() => alert(
             'Localisation',
-            'Tu peux activer/désactiver le partage de ta localisation. Lorsque désactivé, tu ne seras pas comptabilisé dans la zone.'
+            `Frensy utilise ta position approximative (arrondie à ~1km) pour te montrer les personnes autour de toi. Ta position est mise à jour automatiquement quand tu es actif sur l'application. Le mode fantôme (👻) masque ta position instantanément.`
           )}>
             <Text style={[s.link, { color: C.muted }]}>ℹ︎</Text>
           </Pressable>
         </View>
       </GlassCard>
+
+      {/* Floating Action Buttons */}
+      {hasDailyRewardAvailable && (
+        <TouchableOpacity
+          onPress={() => router.push({ pathname: '/store', params: { returnTo: '/(tabs)/home' } } as any)}
+          style={{
+            position: 'absolute',
+            top: 170,
+            right: 20,
+            width: 50,
+            height: 50,
+            borderRadius: 25,
+            backgroundColor: C.card,
+            justifyContent: 'center',
+            alignItems: 'center',
+            borderWidth: 1,
+            borderColor: C.tint,
+            shadowColor: '#000',
+            shadowOpacity: 0.3,
+            shadowRadius: 5,
+            elevation: 5,
+            zIndex: 10
+          }}
+        >
+          <FontAwesome name="gift" size={24} color={C.tint} />
+          <View style={{
+            position: 'absolute',
+            top: -2,
+            right: -2,
+            width: 14,
+            height: 14,
+            borderRadius: 7,
+            backgroundColor: '#EF4444',
+            borderWidth: 2,
+            borderColor: C.card
+          }} />
+        </TouchableOpacity>
+      )}
+
+      {sharingEnabled && !hasDailyBase && (
+        <TouchableOpacity
+          onPress={handleSetDailyLocation}
+          style={{
+            position: 'absolute',
+            top: hasDailyRewardAvailable ? 235 : 170,
+            right: 20,
+            width: 50,
+            height: 50,
+            borderRadius: 25,
+            backgroundColor: C.card,
+            justifyContent: 'center',
+            alignItems: 'center',
+            borderWidth: 1,
+            borderColor: '#3BA55D',
+            shadowColor: '#000',
+            shadowOpacity: 0.3,
+            shadowRadius: 5,
+            elevation: 5,
+            zIndex: 10
+          }}
+        >
+          <FontAwesome name="map-pin" size={24} color="#3BA55D" />
+          <View style={{
+            position: 'absolute',
+            top: -2,
+            right: -2,
+            width: 14,
+            height: 14,
+            borderRadius: 7,
+            backgroundColor: '#3BA55D',
+            borderWidth: 2,
+            borderColor: C.card
+          }} />
+        </TouchableOpacity>
+      )}
 
       {/* Panneau supprimé: icônes fantôme/paramètres déplacées près du logo */}
 
@@ -862,18 +1300,20 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
           <TouchableOpacity
             accessibilityRole="button"
             accessibilityLabel={sharingEnabled ? 'Désactiver le partage de localisation (Mode fantôme)' : 'Activer le partage de localisation'}
-            onPress={() => {
+            onPress={async () => {
+              if (showGhostGuide) await dismissGhostGuide();
               if (sharingEnabled) {
-                Alert.alert(
+                alert(
                   'Mode fantôme',
                   "Voulez-vous vraiment désactiver votre localisation ?\nVous n'apparaitrez plus dans les swipe des utilisateurs et tous vos partages de position actifs seront interrompus.",
                   [
                     { text: 'Non', style: 'cancel' },
-                    { text: 'Oui', style: 'destructive', onPress: async () => { 
-                        setSharingEnabled(false); 
-                        try { 
-                          const { auth } = await import('../../firebaseconfig'); 
-                          const uid = auth.currentUser?.uid; 
+                    { text: 'Oui', style: 'destructive', onPress: async () => {
+                        await endMapSession();
+                        setSharingEnabled(false);
+                        try {
+                          const { auth } = await import('../../firebaseconfig');
+                          const uid = auth.currentUser?.uid;
                           if (uid) { 
                              const batch = writeBatch(db);
                              // 1. Activer le mode fantôme dans les settings privés
@@ -889,12 +1329,14 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
                              sharesSnap.forEach((doc) => {
                                 batch.update(doc.ref, { active: false, revoked: true, updatedAt: Date.now() });
                              });
+                             
+                             batch.delete(doc(db, 'positions', uid));
 
                              await batch.commit();
                              showToast('Mode fantôme activé', 'Votre position est masquée et les partages ont été arrêtés.', 'success');
                           } 
                         } catch (e) {
-                          console.error(e);
+                          try { if (__DEV__) console.error(e); } catch {}
                           showToast('Erreur', 'Impossible d\'activer le mode fantôme', 'error');
                           setSharingEnabled(true); // Rollback
                         } 
@@ -910,10 +1352,10 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
                     if (uid) { 
                       // Désactiver le mode fantôme dans les settings privés
                       await (await import('firebase/firestore')).setDoc(userPrivateRef(uid), { ghostMode: false }, { merge: true }); 
-                      showToast('Mode fantôme désactivé', 'Vous êtes de nouveau visible.', 'success');
+                      showToast('Mode fantôme désactivé', 'Tu peux faire un pointage sur la carte (« Apparaître sur la carte ») quand tu veux être visible.', 'success');
                     } 
                   } catch (e) {
-                     console.error(e);
+                     try { if (__DEV__) console.error(e); } catch {}
                   } 
                   setSharingEnabled(true); 
                 })();
@@ -923,6 +1365,50 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
           >
             <Text style={{ fontSize: 14 }}>{'👻'}</Text>
           </TouchableOpacity>
+
+          {showGhostGuide && (
+            <View 
+              style={{
+                position: 'absolute',
+                bottom: 60,
+                left: 0,
+                backgroundColor: C.tint,
+                padding: 10,
+                borderRadius: 12,
+                width: 140,
+                shadowColor: '#000',
+                shadowOpacity: 0.3,
+                shadowRadius: 5,
+                elevation: 10,
+                zIndex: 999
+              }}
+            >
+              <Text style={{ color: '#FFF', fontSize: 12, fontWeight: '700', textAlign: 'center' }}>
+                Active le mode fantôme ici pour être invisible !
+              </Text>
+              <View 
+                style={{
+                  position: 'absolute',
+                  bottom: -8,
+                  left: 20,
+                  width: 0,
+                  height: 0,
+                  borderLeftWidth: 8,
+                  borderRightWidth: 8,
+                  borderTopWidth: 8,
+                  borderLeftColor: 'transparent',
+                  borderRightColor: 'transparent',
+                  borderTopColor: C.tint
+                }}
+              />
+              <TouchableOpacity 
+                onPress={dismissGhostGuide}
+                style={{ position: 'absolute', top: -10, right: -10, backgroundColor: '#333', borderRadius: 10, width: 20, height: 20, justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#555' }}
+              >
+                <Text style={{ color: '#FFF', fontSize: 10 }}>✕</Text>
+              </TouchableOpacity>
+            </View>
+          )}
 
           <TouchableOpacity
             accessibilityRole="button"
@@ -966,8 +1452,9 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
           {...pan.panHandlers}
           style={{
             position: "absolute",
-            left: 16,
-            right: 16,
+            width: '100%',
+            maxWidth: 500,
+            alignSelf: 'center',
             bottom: 110,
             height: sheetH,
             borderRadius: 24,
@@ -991,9 +1478,34 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
           {selected && (
             <View style={{ padding: 20, flex: 1, gap: 20 }}>
               <View style={{ flexDirection: 'row', gap: 16, alignItems: 'center' }}>
-                  <Image source={selected.img ? { uri: selected.img } : Logo} style={{ width: 72, height: 72, borderRadius: 36, borderWidth: 2, borderColor: 'rgba(255,255,255,0.1)' }} contentFit="cover" blurRadius={(selected as any).isBlur ? 50 : 0} />
+                  <Image 
+                    source={selected.img ? { uri: selected.img } : Logo} 
+                    style={{ 
+                        width: 72, 
+                        height: 72, 
+                        borderRadius: 36, 
+                        borderWidth: 2, 
+                        borderColor: (selected as any).subscription === 'PRO' ? C.gold : ((selected as any).subscription === 'PLUS' ? C.tint : 'rgba(255,255,255,0.1)') 
+                    }} 
+                    contentFit="cover" 
+                    blurRadius={(selected as any).isBlur ? 50 : 0} 
+                  />
                   <View style={{ flex: 1 }}>
-                      <Text style={{ fontSize: 22, fontWeight: '800', color: C.text }}>{selected.name}</Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                          <Text style={{ fontSize: 22, fontWeight: '800', color: C.text }}>{selected.name}</Text>
+                          {((selected as any).subscription === 'PRO' || (selected as any).subscription === 'PLUS') && (
+                              <View style={{ 
+                                  backgroundColor: (selected as any).subscription === 'PRO' ? C.gold : C.tint, 
+                                  paddingHorizontal: 8, 
+                                  paddingVertical: 2, 
+                                  borderRadius: 8 
+                              }}>
+                                  <Text style={{ color: '#fff', fontSize: 10, fontWeight: '900' }}>
+                                      {(selected as any).subscription}
+                                  </Text>
+                              </View>
+                          )}
+                      </View>
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 }}>
                           <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: selStatus.online ? '#3BA55D' : '#999' }} />
                           <Text style={{ color: C.muted, fontSize: 13, fontWeight: '500' }}>
@@ -1010,7 +1522,16 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
                   <TouchableOpacity
                     accessibilityRole="button"
                     accessibilityLabel="Envoyer un message"
-                    onPress={() => router.push(`/chat/${selected.id}` as any)}
+                    onPress={() => {
+                      // Fermer le panneau avant de naviguer
+                      Animated.parallel([
+                        Animated.timing(sheetAnim, { toValue: 0, duration: 200, useNativeDriver: true }),
+                        Animated.timing(fadeAnim, { toValue: 0, duration: 200, useNativeDriver: true })
+                      ]).start(() => {
+                        setSelected(null);
+                        router.push(`/chat/${selected.id}` as any);
+                      });
+                    }}
                     style={{ borderRadius: 18, paddingVertical: 16, backgroundColor: C.tint, shadowColor: C.tint, shadowOpacity: 0.4, shadowRadius: 10, shadowOffset: {width: 0, height: 4}, alignItems: 'center' }}
                   >
                     <Text style={{ color: '#fff', fontWeight: '800', fontSize: 16 }}>Envoyer un message</Text>
@@ -1103,10 +1624,19 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
                         key={`cluster_u_${u.id}`}
                         accessibilityRole="button"
                         accessibilityLabel={`Ouvrir le profil de ${u.name}`}
-                        onPress={() => router.push(`/chat/${u.id}` as any)}
+                        onPress={() => {
+                           // On ferme le regroupement et on ouvre le profil individuel
+                           setClusterSel(null);
+                           setSelected(u);
+                        }}
                         style={{ alignItems: 'center', width: 70 }}
                       > 
-                        <Image source={u.img ? { uri: u.img } : Logo} style={{ width: 56, height: 56, borderRadius: 28 }} contentFit="cover" blurRadius={(u as any).isBlur ? 10 : 0} />
+                        <Avatar 
+                          uri={u.img} 
+                          initials={u.name[0]} 
+                          size={56} 
+                          blurRadius={(u as any).isBlur ? 50 : 0} 
+                        />
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 6 }}>
                           <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: online ? '#3BA55D' : '#999' }} />
                           <Text numberOfLines={1} style={{ color: online ? (scheme === 'dark' ? '#9CF99C' : '#0F7A0F') : C.muted, fontSize: 11, maxWidth: 60 }}>
@@ -1193,13 +1723,14 @@ const [selStatus, setSelStatus] = useState<{ online: boolean; last: number | nul
         </KeyboardAvoidingView>
       </Modal>
 
-      <DailyLocationPrompt />
+
 
       {loading && (
         <View style={s.loadingOverlay}>
           <ActivityIndicator size="large" color={C.tint} />
         </View>
       )}
+      <SafetyInfoModal />
     </View>
   );
 }
@@ -1264,8 +1795,8 @@ const s = StyleSheet.create<Styles>({
   hudGlass: {
     position: "absolute",
     alignSelf: 'center',
-    width: 'auto',
-    minWidth: 220,
+    width: '85%',
+    maxWidth: 320,
     bottom: 90,
     zIndex: 20,
   },

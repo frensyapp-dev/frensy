@@ -2,9 +2,9 @@
 import { ChatTabIcon, ProfileTabIcon } from '@/components/navigation/TabBarIcons';
 import { Colors } from '@/constants/Colors';
 import { auth, db } from '@/firebaseconfig';
+import { nextRouteForProfile } from '@/lib/authGate';
 import { listenMyMatches, markConversationRead } from '@/lib/chat/storage';
-import { dismissChatNotification, registerNotificationCategories, showMessageNotification } from '@/lib/notifications';
-import { startRealtimePositionTracking } from '@/lib/positions';
+import { dismissChatNotification, ensurePushPermissionAndSave, registerNotificationCategories, showMessageNotification } from '@/lib/notifications';
 import { getUserProfile, UserProfile } from '@/lib/profile';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -33,7 +33,6 @@ export default function TabsLayout() {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const C = Colors['dark'];
   const CDark = Colors['dark'];
-  const stopTrackingRef = useRef<(() => void) | null>(null);
   const pathname = usePathname();
 
   // Notification logic
@@ -81,12 +80,17 @@ export default function TabsLayout() {
           if (mounted) setChecking(false);
           return;
         }
+        
+        // S'assurer que les notifications sont configurées
+        void ensurePushPermissionAndSave().catch(() => {});
+
         const prof = await getUserProfile(u.uid);
         if (mounted) {
           setProfile(prof);
         }
-        if (!prof?.completed) {
-          router.replace('/onboarding/welcome');
+        const nextRoute = nextRouteForProfile(prof);
+        if (!prof?.completed && nextRoute !== '/(tabs)/home') {
+          router.replace(nextRoute as any);
         }
         if (mounted) setChecking(false);
       })();
@@ -141,31 +145,10 @@ export default function TabsLayout() {
     const u = auth.currentUser;
     if (!u) return;
     if (profile?.ghostMode) {
-      if (stopTrackingRef.current) {
-        try { stopTrackingRef.current(); } catch {}
-        stopTrackingRef.current = null;
-      }
       deleteDoc(doc(db, 'positions', u.uid)).catch(() => {});
-      return;
-    }
-    if (profile && !stopTrackingRef.current) {
-      startRealtimePositionTracking().then(stop => {
-        stopTrackingRef.current = stop;
-      }).catch(e => {
-        // Tracking start failed
-      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile?.ghostMode, auth.currentUser?.uid, profile]);
-
-  useEffect(() => {
-    return () => {
-      if (stopTrackingRef.current) {
-        try { stopTrackingRef.current(); } catch {}
-        stopTrackingRef.current = null;
-      }
-    };
-  }, []);
 
   useEffect(() => {
     (async () => {
@@ -311,4 +294,3 @@ export default function TabsLayout() {
     </GestureHandlerRootView>
   );
 }
-
