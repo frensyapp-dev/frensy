@@ -92,5 +92,14 @@
       "node_modules/(?!react-native|expo|@expo|expo-modules-core|@react-native|@react-navigation|@firebase|firebase)"
     ]
   },
+  "expo": {
+    "autolinking": {
+      "ios": {
+        "searchPaths": [
+          "node_modules"
+        ]
+      }
+    }
+  },
   "private": true
 }
