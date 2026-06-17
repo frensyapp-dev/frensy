@@ -57,6 +57,7 @@ const config = {
     favicon: asset('assets/images/favicon.png'),
   },
   plugins: [
+    './plugins/withIosModularHeaders',
     'expo-router',
     'expo-font',
     [
