@@ -21,6 +21,7 @@
     "@react-navigation/elements": "^2.3.8",
     "@react-navigation/material-top-tabs": "^7.4.11",
     "@react-navigation/native": "^7.1.6",
+    "babel-preset-expo": "~54.0.10",
     "dayjs": "^1.11.18",
     "expo": "~54.0.35",
     "expo-apple-authentication": "~8.0.8",
