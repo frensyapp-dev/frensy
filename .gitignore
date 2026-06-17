@@ -27,6 +27,7 @@ yarn-debug.*
 yarn-error.*
 .eas_build_view.json
 .eas_build_view.err.txt
+.eas-build*.log
 
 # macOS
 .DS_Store
